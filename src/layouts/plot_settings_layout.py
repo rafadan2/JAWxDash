@@ -52,6 +52,74 @@ spot_layout = dbc.Card([
             )
         ]),
 
+        # Gradient grid mode
+        dbc.Row([
+            dbc.Col(
+                html.Label("Grid mode", className="mb-0 d-block text-body text-decoration-none"),
+                width=5,
+            ),
+            dbc.Col(
+                dcc.RadioItems(
+                    id=ids.RadioItems.GRADIENT_GRID_MODE,
+                    options=[
+                        {"label": "Auto", "value": "auto"},
+                        {"label": "Manual", "value": "manual"},
+                    ],
+                    inline=True,
+                    labelStyle={"margin-right": "15px"},
+                    className="mb-0",
+                ),
+                width=7,
+            )
+        ]),
+
+        # Gradient grid size
+        dbc.Row(
+            html.Label("Gradient grid size", style={"textAlign": "center"})
+        ),
+        dbc.Row(
+            dcc.Slider(
+                id=ids.Slider.GRADIENT_GRID_SIZE,
+                min=24,
+                max=180,
+                step=1,
+                marks={
+                    24: "24",
+                    32: "32",
+                    48: "48",
+                    64: "64",
+                    96: "96",
+                    128: "128",
+                    160: "160",
+                    180: "180",
+                },
+                className="mb-0",
+            )
+        ),
+
+        # Gradient k-nearest
+        dbc.Row(
+            html.Label("Gradient k-nearest", style={"textAlign": "center"})
+        ),
+        dbc.Row(
+            dcc.Slider(
+                id=ids.Slider.GRADIENT_K_NEAREST,
+                min=4,
+                max=64,
+                step=1,
+                marks={
+                    4: "4",
+                    8: "8",
+                    16: "16",
+                    24: "24",
+                    32: "32",
+                    48: "48",
+                    64: "64",
+                },
+                className="mb-0",
+            )
+        ),
+
         # Colormap
         dbc.Row([
             dbc.Col(

@@ -24,6 +24,13 @@ logger = logging.getLogger(__name__)
 
 
 CRITICAL_COUNT = 500
+GRID_SIZE_MIN = 24
+GRID_SIZE_MAX = 180
+GRID_SIZE_AUTO_MIN = 40
+GRID_SIZE_AUTO_MAX = 160
+GRID_SIZE_AUTO_MAX_DENSE = 100
+K_NEAREST_MIN = 4
+K_NEAREST_MAX = 64
 
 
 # Adding a placeholder for sample outline
@@ -53,7 +60,7 @@ def _gradient_label(gradient_mode, z_label):
     return labels.get(gradient_mode, f"|grad({z_label})|")
 
 
-def _interpolate_idw_grid(x_data, y_data, z_data):
+def _interpolate_idw_grid(x_data, y_data, z_data, grid_mode="auto", grid_size=None, k_nearest=None):
     finite_mask = np.isfinite(x_data) & np.isfinite(y_data) & np.isfinite(z_data)
     x = np.asarray(x_data)[finite_mask]
     y = np.asarray(y_data)[finite_mask]
@@ -70,12 +77,26 @@ def _interpolate_idw_grid(x_data, y_data, z_data):
     if x_span <= 0 or y_span <= 0:
         return None
 
-    grid_size = int(np.clip(np.sqrt(point_count) * 4, 40, 160))
-    if point_count > 3 * CRITICAL_COUNT:
-        grid_size = min(grid_size, 100)
+    if grid_mode == "manual":
+        try:
+            resolved_grid_size = int(grid_size)
+        except (TypeError, ValueError):
+            resolved_grid_size = DEFAULT_SETTINGS["gradient_grid_size"]
+        resolved_grid_size = int(np.clip(resolved_grid_size, GRID_SIZE_MIN, GRID_SIZE_MAX))
+    else:
+        resolved_grid_size = int(np.clip(np.sqrt(point_count) * 4, GRID_SIZE_AUTO_MIN, GRID_SIZE_AUTO_MAX))
+        if point_count > 3 * CRITICAL_COUNT:
+            resolved_grid_size = min(resolved_grid_size, GRID_SIZE_AUTO_MAX_DENSE)
 
-    xi = np.linspace(x_min, x_max, grid_size)
-    yi = np.linspace(y_min, y_max, grid_size)
+    try:
+        resolved_k_nearest = int(k_nearest)
+    except (TypeError, ValueError):
+        resolved_k_nearest = DEFAULT_SETTINGS["gradient_k_nearest"]
+    resolved_k_nearest = int(np.clip(resolved_k_nearest, K_NEAREST_MIN, K_NEAREST_MAX))
+    k_eff = min(resolved_k_nearest, point_count)
+
+    xi = np.linspace(x_min, x_max, resolved_grid_size)
+    yi = np.linspace(y_min, y_max, resolved_grid_size)
     xx, yy = np.meshgrid(xi, yi)
 
     flat_x = xx.ravel()
@@ -92,22 +113,31 @@ def _interpolate_idw_grid(x_data, y_data, z_data):
         dy = flat_y[start:stop, None] - y[None, :]
         dist2 = dx * dx + dy * dy
 
-        nearest_idx = np.argmin(dist2, axis=1)
-        row_idx = np.arange(dist2.shape[0])
-        closest_dist2 = dist2[row_idx, nearest_idx]
+        if k_eff < point_count:
+            neighbor_idx = np.argpartition(dist2, kth=k_eff - 1, axis=1)[:, :k_eff]
+            selected_dist2 = np.take_along_axis(dist2, neighbor_idx, axis=1)
+            selected_z = z[neighbor_idx]
+        else:
+            selected_dist2 = dist2
+            selected_z = z[None, :]
+
+        nearest_idx = np.argmin(selected_dist2, axis=1)
+        row_idx = np.arange(selected_dist2.shape[0])
+        closest_dist2 = selected_dist2[row_idx, nearest_idx]
         nearest_dist[start:stop] = np.sqrt(closest_dist2)
 
         exact_mask = closest_dist2 < eps
-        chunk_values = np.empty(dist2.shape[0], dtype=float)
+        chunk_values = np.empty(selected_dist2.shape[0], dtype=float)
         if np.any(exact_mask):
-            chunk_values[exact_mask] = z[nearest_idx[exact_mask]]
+            chunk_values[exact_mask] = selected_z[row_idx[exact_mask], nearest_idx[exact_mask]]
 
         non_exact_mask = ~exact_mask
         if np.any(non_exact_mask):
-            non_exact_dist2 = dist2[non_exact_mask]
+            non_exact_dist2 = selected_dist2[non_exact_mask]
+            non_exact_z = selected_z[non_exact_mask]
             weights = 1.0 / (non_exact_dist2 + eps)
             chunk_values[non_exact_mask] = (
-                np.sum(weights * z[None, :], axis=1) / np.sum(weights, axis=1)
+                np.sum(weights * non_exact_z, axis=1) / np.sum(weights, axis=1)
             )
 
         z_interp[start:stop] = chunk_values
@@ -117,11 +147,18 @@ def _interpolate_idw_grid(x_data, y_data, z_data):
     mask_threshold = max(3.0 * spacing_estimate, 1e-6)
     z_interp[nearest_dist > mask_threshold] = np.nan
 
-    return xi, yi, z_interp.reshape(grid_size, grid_size)
+    return xi, yi, z_interp.reshape(resolved_grid_size, resolved_grid_size)
 
 
-def _build_gradient_map(x_data, y_data, z_data, gradient_mode):
-    interpolated = _interpolate_idw_grid(x_data, y_data, z_data)
+def _build_gradient_map(x_data, y_data, z_data, gradient_mode, grid_mode="auto", grid_size=None, k_nearest=None):
+    interpolated = _interpolate_idw_grid(
+        x_data,
+        y_data,
+        z_data,
+        grid_mode=grid_mode,
+        grid_size=grid_size,
+        k_nearest=k_nearest,
+    )
     if not interpolated:
         return None
 
@@ -201,8 +238,23 @@ def update_figure(selected_file:str, uploaded_files:dict, settings:dict):
     z_data = file.data[z_label].to_numpy()
 
     gradient_mode = settings.get("gradient_mode", "none")
+    gradient_grid_mode = settings.get("gradient_grid_mode", "auto")
+    gradient_grid_size = settings.get("gradient_grid_size")
+    gradient_k_nearest = settings.get("gradient_k_nearest")
     use_gradient_map = gradient_mode != "none"
-    gradient_result = _build_gradient_map(x_data, y_data, z_data, gradient_mode) if use_gradient_map else None
+    gradient_result = (
+        _build_gradient_map(
+            x_data,
+            y_data,
+            z_data,
+            gradient_mode,
+            grid_mode=gradient_grid_mode,
+            grid_size=gradient_grid_size,
+            k_nearest=gradient_k_nearest,
+        )
+        if use_gradient_map
+        else None
+    )
 
     if use_gradient_map and gradient_result:
         xi, yi, gradient_grid = gradient_result

@@ -22,6 +22,9 @@ DEFAULT_SETTINGS = dict(
     sample_outline="sector",
     z_data_value="",
     gradient_mode="none",
+    gradient_grid_mode="auto",
+    gradient_grid_size=96,
+    gradient_k_nearest=24,
     z_scale_min=None,
     z_scale_max=None,
 

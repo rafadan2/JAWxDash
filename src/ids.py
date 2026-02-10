@@ -45,6 +45,7 @@ class Input:
 class RadioItems:
     PLOT_STYLE = "radioitems_plot_style"
     SPOT_SIZE = "radioitems_spot_size"
+    GRADIENT_GRID_MODE = "radioitems_gradient_grid_mode"
     EDGE_EXCLUSION_STATE = "radioitems_edge_exclusion_state"
     EDGE_EXCLUSION_TYPE = "radioitems_edge_exclusion_type"
     BATCH_PROCESSING = "radioitems_batch_processing"
@@ -55,6 +56,8 @@ class Slider:
     ANGLE_OF_INCIDENT = "slider_angle_of_incident"
     SPOT_SIZE = "slider_spot_size"
     MARKER_SIZE = "slider_marker_size"
+    GRADIENT_GRID_SIZE = "slider_gradient_grid_size"
+    GRADIENT_K_NEAREST = "slider_gradient_k_nearest"
 
 
 class Store:
