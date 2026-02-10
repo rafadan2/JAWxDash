@@ -20,6 +20,7 @@ class DropDown:
     COLORMAPS = "dropdown_colormaps"
     SAMPLE_OUTLINE = "dropdown_sample_outline"
     Z_DATA = "dropdown_z_data"
+    GRADIENT_MODE = "dropdown_gradient_mode"
     
 
 class Graph:

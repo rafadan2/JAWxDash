@@ -5,8 +5,11 @@ import numpy as np
 
 from src import ids
 from src.ellipsometry_toolbox.ellipsometry import Ellipsometry
+from src.ellipsometry_toolbox.linear_translations import rotate, translate
+from src.templates.settings_template import DEFAULT_SETTINGS
 
 logger = logging.getLogger(__name__)
+CRITICAL_COUNT = 500
 
 
 @callback(
@@ -21,6 +24,7 @@ logger = logging.getLogger(__name__)
     Output(ids.DropDown.COLORMAPS, "options"),
     Output(ids.DropDown.SAMPLE_OUTLINE, "value"),
     Output(ids.DropDown.Z_DATA, "value"),
+    Output(ids.DropDown.GRADIENT_MODE, "value"),
     Output(ids.Input.Z_SCALE_MIN, "value"),
     Output(ids.Input.Z_SCALE_MAX, "value"),
     
@@ -64,6 +68,7 @@ def load_default_settings(default_settings):
         default_settings["colormap_options"],
         default_settings["sample_outline"],
         default_settings["z_data_value"],
+        default_settings["gradient_mode"],
         default_settings["z_scale_min"],
         default_settings["z_scale_max"],
         
@@ -104,6 +109,7 @@ def load_default_settings(default_settings):
     Input(ids.DropDown.COLORMAPS, "value"),
     Input(ids.DropDown.SAMPLE_OUTLINE, "value"),
     Input(ids.DropDown.Z_DATA, "value"),
+    Input(ids.DropDown.GRADIENT_MODE, "value"),
     Input(ids.Input.Z_SCALE_MIN, "value"),
     Input(ids.Input.Z_SCALE_MAX, "value"),
     
@@ -134,14 +140,14 @@ def load_default_settings(default_settings):
 )
 def update_offset_setting_store(
     marker_type, angle_of_incident, spot_size, marker_size,
-    colormap_value, sample_outline, z_data_value, z_scale_min, z_scale_max,
+    colormap_value, sample_outline, z_data_value, gradient_mode, z_scale_min, z_scale_max,
     x_map, y_map, t_map, 
     x_sam, y_sam, t_sam, r_sam, w_sam, h_sam,
     ee_state, ee_type, ee_distance, batch_processing,
     stage_state,
     settings
     ):
-
+    settings = settings or {}
 
     keys = (
         "marker_type", 
@@ -151,6 +157,7 @@ def update_offset_setting_store(
         "colormap_value", 
         "sample_outline", 
         "z_data_value",
+        "gradient_mode",
         "z_scale_min",
         "z_scale_max",
         "mappattern_x",
@@ -170,7 +177,7 @@ def update_offset_setting_store(
     )
     values = (
         marker_type, angle_of_incident, spot_size, marker_size,
-        colormap_value, sample_outline, z_data_value,
+        colormap_value, sample_outline, z_data_value, gradient_mode,
         z_scale_min, z_scale_max,
         x_map, y_map, t_map,
         x_sam, y_sam, t_sam, r_sam, w_sam, h_sam,
@@ -197,7 +204,112 @@ def _resolve_z_key(file, z_key):
     return None
 
 
-def _calculate_z_min_max(selected_file, uploaded_files, z_key):
+def _interpolate_idw_grid(x_data, y_data, z_data):
+    finite_mask = np.isfinite(x_data) & np.isfinite(y_data) & np.isfinite(z_data)
+    x = np.asarray(x_data)[finite_mask]
+    y = np.asarray(y_data)[finite_mask]
+    z = np.asarray(z_data)[finite_mask]
+
+    point_count = z.size
+    if point_count < 3:
+        return None
+
+    x_min, x_max = float(np.min(x)), float(np.max(x))
+    y_min, y_max = float(np.min(y)), float(np.max(y))
+    x_span = x_max - x_min
+    y_span = y_max - y_min
+    if x_span <= 0 or y_span <= 0:
+        return None
+
+    grid_size = int(np.clip(np.sqrt(point_count) * 4, 40, 160))
+    if point_count > 3 * CRITICAL_COUNT:
+        grid_size = min(grid_size, 100)
+
+    xi = np.linspace(x_min, x_max, grid_size)
+    yi = np.linspace(y_min, y_max, grid_size)
+    xx, yy = np.meshgrid(xi, yi)
+
+    flat_x = xx.ravel()
+    flat_y = yy.ravel()
+    z_interp = np.full(flat_x.shape[0], np.nan, dtype=float)
+    nearest_dist = np.full(flat_x.shape[0], np.inf, dtype=float)
+
+    eps = 1e-12
+    chunk_size = 1024
+    for start in range(0, flat_x.shape[0], chunk_size):
+        stop = min(start + chunk_size, flat_x.shape[0])
+
+        dx = flat_x[start:stop, None] - x[None, :]
+        dy = flat_y[start:stop, None] - y[None, :]
+        dist2 = dx * dx + dy * dy
+
+        nearest_idx = np.argmin(dist2, axis=1)
+        row_idx = np.arange(dist2.shape[0])
+        closest_dist2 = dist2[row_idx, nearest_idx]
+        nearest_dist[start:stop] = np.sqrt(closest_dist2)
+
+        exact_mask = closest_dist2 < eps
+        chunk_values = np.empty(dist2.shape[0], dtype=float)
+        if np.any(exact_mask):
+            chunk_values[exact_mask] = z[nearest_idx[exact_mask]]
+
+        non_exact_mask = ~exact_mask
+        if np.any(non_exact_mask):
+            non_exact_dist2 = dist2[non_exact_mask]
+            weights = 1.0 / (non_exact_dist2 + eps)
+            chunk_values[non_exact_mask] = (
+                np.sum(weights * z[None, :], axis=1) / np.sum(weights, axis=1)
+            )
+
+        z_interp[start:stop] = chunk_values
+
+    point_area = (x_span * y_span) / point_count
+    spacing_estimate = np.sqrt(point_area) if point_area > 0 else 0.0
+    mask_threshold = max(3.0 * spacing_estimate, 1e-6)
+    z_interp[nearest_dist > mask_threshold] = np.nan
+
+    return xi, yi, z_interp.reshape(grid_size, grid_size)
+
+
+def _build_gradient_map(x_data, y_data, z_data, gradient_mode):
+    interpolated = _interpolate_idw_grid(x_data, y_data, z_data)
+    if not interpolated:
+        return None
+
+    xi, yi, z_grid = interpolated
+    dz_dy, dz_dx = np.gradient(z_grid, yi, xi, edge_order=1)
+
+    if gradient_mode == "dx":
+        gradient_grid = dz_dx
+    elif gradient_mode == "dy":
+        gradient_grid = dz_dy
+    else:
+        gradient_grid = np.hypot(dz_dx, dz_dy)
+
+    return gradient_grid
+
+
+def _extract_active_plot_values(file, z_key, gradient_mode, settings):
+    z_values = file.data[z_key].to_numpy()
+
+    if gradient_mode == "none":
+        return z_values[np.isfinite(z_values)]
+
+    x_data = np.array(file.data["x"])
+    y_data = np.array(file.data["y"])
+    xy = rotate(np.vstack([x_data, y_data]), settings.get("mappattern_theta", 0.0))
+    xy = translate(xy, [settings.get("mappattern_x", 0.0), settings.get("mappattern_y", 0.0)])
+    x_data = xy[0, :]
+    y_data = xy[1, :]
+
+    gradient_grid = _build_gradient_map(x_data, y_data, z_values, gradient_mode)
+    if gradient_grid is None:
+        return z_values[np.isfinite(z_values)]
+
+    return gradient_grid[np.isfinite(gradient_grid)]
+
+
+def _calculate_z_min_max(selected_file, uploaded_files, z_key, gradient_mode, settings):
     if not selected_file or not uploaded_files or selected_file not in uploaded_files:
         return None
 
@@ -206,9 +318,13 @@ def _calculate_z_min_max(selected_file, uploaded_files, z_key):
     if not z_key:
         return None
 
-    z_data = file.data[z_key].to_numpy()
-    zmin = float(np.nanmin(z_data))
-    zmax = float(np.nanmax(z_data))
+    active_settings = {**DEFAULT_SETTINGS, **(settings or {})}
+    active_values = _extract_active_plot_values(file, z_key, gradient_mode, active_settings)
+    if active_values.size == 0:
+        return None
+
+    zmin = float(np.nanmin(active_values))
+    zmax = float(np.nanmax(active_values))
 
     if not np.isfinite(zmin) or not np.isfinite(zmax):
         return None
@@ -220,27 +336,34 @@ def _calculate_z_min_max(selected_file, uploaded_files, z_key):
     Output(ids.Input.Z_SCALE_MIN, "value", allow_duplicate=True),
     Output(ids.Input.Z_SCALE_MAX, "value", allow_duplicate=True),
     Input(ids.Button.Z_SCALE_2SIGMA, "n_clicks"),
+    State(ids.DropDown.Z_DATA, "value"),
+    State(ids.DropDown.GRADIENT_MODE, "value"),
     State(ids.DropDown.UPLOADED_FILES, "value"),
     State(ids.Store.UPLOADED_FILES, "data"),
     State(ids.Store.SETTINGS, "data"),
     prevent_initial_call=True,
 )
-def set_z_scale_2sigma(n_clicks, selected_file, uploaded_files, settings):
+def set_z_scale_2sigma(n_clicks, z_key, gradient_mode, selected_file, uploaded_files, settings):
     if not n_clicks or not selected_file:
         return no_update, no_update
 
     if not uploaded_files or selected_file not in uploaded_files:
         return no_update, no_update
 
+    settings = {**DEFAULT_SETTINGS, **(settings or {})}
     file = Ellipsometry.from_path_or_stream(uploaded_files[selected_file])
-    z_key = settings.get("z_data_value") if settings else None
-    z_key = _resolve_z_key(file, z_key)
-    if not z_key:
+    active_z_key = z_key or settings.get("z_data_value")
+    active_z_key = _resolve_z_key(file, active_z_key)
+    if not active_z_key:
         return no_update, no_update
 
-    z_data = file.data[z_key].to_numpy()
-    median = float(np.nanmedian(z_data))
-    sigma = float(np.nanstd(z_data))
+    active_gradient_mode = gradient_mode or settings.get("gradient_mode", "none")
+    active_values = _extract_active_plot_values(file, active_z_key, active_gradient_mode, settings)
+    if active_values.size == 0:
+        return no_update, no_update
+
+    median = float(np.nanmedian(active_values))
+    sigma = float(np.nanstd(active_values))
 
     if not np.isfinite(median) or not np.isfinite(sigma):
         return no_update, no_update
@@ -253,15 +376,19 @@ def set_z_scale_2sigma(n_clicks, selected_file, uploaded_files, settings):
     Output(ids.Input.Z_SCALE_MAX, "value", allow_duplicate=True),
     Input(ids.Button.Z_SCALE_AUTO, "n_clicks"),
     State(ids.DropDown.Z_DATA, "value"),
+    State(ids.DropDown.GRADIENT_MODE, "value"),
     State(ids.DropDown.UPLOADED_FILES, "value"),
     State(ids.Store.UPLOADED_FILES, "data"),
+    State(ids.Store.SETTINGS, "data"),
     prevent_initial_call=True,
 )
-def set_z_scale_auto(n_clicks, z_key, selected_file, uploaded_files):
+def set_z_scale_auto(n_clicks, z_key, gradient_mode, selected_file, uploaded_files, settings):
     if not n_clicks:
         return no_update, no_update
 
-    result = _calculate_z_min_max(selected_file, uploaded_files, z_key)
+    settings = {**DEFAULT_SETTINGS, **(settings or {})}
+    active_gradient_mode = gradient_mode or settings.get("gradient_mode", "none")
+    result = _calculate_z_min_max(selected_file, uploaded_files, z_key, active_gradient_mode, settings)
     if not result:
         return no_update, no_update
 
@@ -272,12 +399,16 @@ def set_z_scale_auto(n_clicks, z_key, selected_file, uploaded_files):
     Output(ids.Input.Z_SCALE_MIN, "value", allow_duplicate=True),
     Output(ids.Input.Z_SCALE_MAX, "value", allow_duplicate=True),
     Input(ids.DropDown.Z_DATA, "value"),
+    Input(ids.DropDown.GRADIENT_MODE, "value"),
     State(ids.DropDown.UPLOADED_FILES, "value"),
     State(ids.Store.UPLOADED_FILES, "data"),
+    State(ids.Store.SETTINGS, "data"),
     prevent_initial_call=True,
 )
-def update_z_scale_on_zdata_change(z_key, selected_file, uploaded_files):
-    result = _calculate_z_min_max(selected_file, uploaded_files, z_key)
+def update_z_scale_on_plot_selection_change(z_key, gradient_mode, selected_file, uploaded_files, settings):
+    settings = {**DEFAULT_SETTINGS, **(settings or {})}
+    active_gradient_mode = gradient_mode or settings.get("gradient_mode", "none")
+    result = _calculate_z_min_max(selected_file, uploaded_files, z_key, active_gradient_mode, settings)
     if not result:
         return no_update, no_update
 

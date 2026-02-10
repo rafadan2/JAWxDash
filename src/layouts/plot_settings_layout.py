@@ -29,6 +29,29 @@ spot_layout = dbc.Card([
             )
         ]),
 
+        # Gradient mode
+        dbc.Row([
+            dbc.Col(
+                html.Label("Gradient", className="mb-0 d-block text-body text-decoration-none"),
+                width=5,
+            ),
+            dbc.Col(
+                dcc.Dropdown(
+                    id=ids.DropDown.GRADIENT_MODE,
+                    options=[
+                        {"label": "None", "value": "none"},
+                        {"label": "|grad Z|", "value": "magnitude"},
+                        {"label": "dZ/dX", "value": "dx"},
+                        {"label": "dZ/dY", "value": "dy"},
+                    ],
+                    multi=False,
+                    clearable=False,
+                    className="mb-0",
+                ),
+                width=7,
+            )
+        ]),
+
         # Colormap
         dbc.Row([
             dbc.Col(
