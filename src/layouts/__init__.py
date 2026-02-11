@@ -6,3 +6,4 @@ from src.layouts.sample_layout import outline_layout
 from src.layouts.mappattern_layout import mappattern_layout
 from src.layouts.stat_table_layout import stat_table_layout
 from src.layouts.stage_layout import stage_layout
+from src.layouts.analysis_tabs_layout import analysis_tabs_layout

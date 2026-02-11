@@ -5,7 +5,7 @@ import dash_bootstrap_components as dbc
 # Local import
 from src import ids
 from src.logger_config import setup_logging
-from src.layouts import edge_exclusion_layout, filemanager_layout, graph_layout, outline_layout, spot_layout, mappattern_layout, stat_table_layout, stage_layout
+from src.layouts import edge_exclusion_layout, filemanager_layout, graph_layout, outline_layout, spot_layout, mappattern_layout, analysis_tabs_layout, stage_layout
 
 
 from src.templates.settings_template import DEFAULT_SETTINGS
@@ -41,7 +41,7 @@ app.layout = dbc.Container([
             dbc.Card([
                 dbc.CardBody([
                     graph_layout,
-                    stat_table_layout,
+                    analysis_tabs_layout,
                 ])
             ], className="mt-1"),
         ], width=7),
@@ -71,6 +71,7 @@ app.layout = dbc.Container([
 import src.callbacks.edge_exclusion_callbacks
 import src.callbacks.filemanager_callbacks
 import src.callbacks.graph_callbacks
+import src.callbacks.distribution_callbacks
 import src.callbacks.settings_callback
 import src.callbacks.stat_table_callback
 import src.callbacks.store_callbacks

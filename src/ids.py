@@ -9,6 +9,7 @@ class Button:
 class Div:
     INFO = "div_info"
     STAT_TABLE = "div_stat_table"
+    DISTRIBUTION_METRICS = "div_distribution_metrics"
 
 
 class Download:
@@ -25,6 +26,9 @@ class DropDown:
 
 class Graph:
     MAIN = "graph_main"
+    DISTRIBUTION_XY = "graph_distribution_xy"
+    DISTRIBUTION_RESIDUALS = "graph_distribution_residuals"
+    DISTRIBUTION_RADIAL = "graph_distribution_radial"
 
 
 class Input:
@@ -64,6 +68,10 @@ class Store:
     UPLOADED_FILES = "store_uploaded_files"
     DEFAULT_SETTINGS = "store_default_settings"
     SETTINGS = "store_settings"
+
+
+class Tabs:
+    ANALYSIS = "tabs_analysis"
 
 
 class Text:
