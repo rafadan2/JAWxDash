@@ -7,6 +7,7 @@ import logging
 from src import ids
 from src.ellipsometry_toolbox.ellipsometry import Ellipsometry
 from src.ellipsometry_toolbox.masking import create_masked_file
+from src.utils.file_manager import get_file_path
 
 
 logger = logging.getLogger(__name__)
@@ -23,7 +24,11 @@ def update_stat_table(selected_file, settings, stored_files):
     if not selected_file:
         return None
     
-    file = Ellipsometry.from_path_or_stream(stored_files[selected_file])
+    file_path = get_file_path(stored_files, selected_file)
+    if not file_path:
+        return None
+
+    file = Ellipsometry.from_path_or_stream(file_path)
 
     if settings["ee_state"]:
         file = create_masked_file(file, settings)

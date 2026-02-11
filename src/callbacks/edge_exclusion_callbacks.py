@@ -10,6 +10,7 @@ import zipfile
 from src.ellipsometry_toolbox.ellipsometry import Ellipsometry
 from src.ellipsometry_toolbox.masking import create_masked_file
 from src import ids
+from src.utils.file_manager import get_file_path
 
 
 logger = logging.getLogger(__name__)
@@ -28,7 +29,11 @@ def update_excluded_points_text(selected_file:str, settings:dict, stored_files:d
         return ""
     
     # Loading into JAWFile object
-    file = Ellipsometry.from_path_or_stream(stored_files[selected_file])
+    file_path = get_file_path(stored_files, selected_file)
+    if not file_path:
+        return ""
+
+    file = Ellipsometry.from_path_or_stream(file_path)
     out_file = create_masked_file(file, settings)
 
 
@@ -76,7 +81,11 @@ def download_edge_exclusion(n_clicks, selected_file:str, stored_files:dict, sett
 
 
                 # Loading into JAWFile object
-                file = Ellipsometry.from_path_or_stream(stored_files[selected_file])
+                file_path = get_file_path(stored_files, selected_file)
+                if not file_path:
+                    continue
+
+                file = Ellipsometry.from_path_or_stream(file_path)
                 masked_file = create_masked_file(file, settings)
 
                 file_names.append(file_name)
@@ -126,7 +135,11 @@ def download_edge_exclusion(n_clicks, selected_file:str, stored_files:dict, sett
     
 
         # Loading into JAWFile object
-        file = Ellipsometry.from_path_or_stream(stored_files[selected_file])
+        file_path = get_file_path(stored_files, selected_file)
+        if not file_path:
+            return None
+
+        file = Ellipsometry.from_path_or_stream(file_path)
         masked_file = create_masked_file(file, settings)
         
         buffer = masked_file.to_buffer()

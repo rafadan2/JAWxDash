@@ -15,6 +15,7 @@ from src.ellipsometry_toolbox.masking import radial_edge_exclusion_outline, unif
 from src.utils.utilities import gen_spot
 from src.ellipsometry_toolbox.linear_translations import rotate, translate
 from src.utils.dxf import dxf_to_path
+from src.utils.file_manager import get_file_path, get_file_title
 
 
 from src.templates.graph_template import FIGURE_LAYOUT
@@ -33,7 +34,7 @@ r = 1*2.54
         Output(ids.Graph.MAIN, "figure"),
         Output(ids.DropDown.Z_DATA, "options"),
         Input(ids.DropDown.UPLOADED_FILES, "value"),
-        State(ids.Store.UPLOADED_FILES, "data"),
+        Input(ids.Store.UPLOADED_FILES, "data"),
         Input(ids.Store.SETTINGS, "data")
 )
 def update_figure(selected_file:str, uploaded_files:dict, settings:dict):
@@ -71,7 +72,11 @@ def update_figure(selected_file:str, uploaded_files:dict, settings:dict):
     
     
     # A sample has been selected, now let's unpack
-    file = Ellipsometry.from_path_or_stream(uploaded_files[selected_file])
+    file_path = get_file_path(uploaded_files, selected_file)
+    if not file_path:
+        return no_update, no_update
+
+    file = Ellipsometry.from_path_or_stream(file_path)
 
 
     # Setting z-data-value default if non selected
@@ -111,7 +116,7 @@ def update_figure(selected_file:str, uploaded_files:dict, settings:dict):
         size=15 if settings["marker_type"]=="point" else 1,
         color=z_data,  # numeric value
         colorscale=settings["colormap_value"],  # set the colormap
-        colorbar=dict(title="value"),  # optional colorbar
+        colorbar=dict(title=settings["z_data_value"] or "value"),  # optional colorbar
         showscale=True  # show the color scale
     )
 
@@ -183,6 +188,17 @@ def update_figure(selected_file:str, uploaded_files:dict, settings:dict):
         xaxis=dict(range=[xmin - scale_factor*scale_range, xmax + scale_factor*scale_range]),
         yaxis=dict(range=[ymin - scale_factor*scale_range, ymax + scale_factor*scale_range]),
     )
+
+    title = get_file_title(uploaded_files, selected_file)
+    if title:
+        figure.update_layout(
+            title=dict(
+                text=f"<b>{title}</b>",
+                x=0.5,
+                xanchor="center",
+                font=dict(size=18),
+            )
+        )
 
 
     return figure, sorted(file.get_column_names())

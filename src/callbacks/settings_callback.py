@@ -5,6 +5,7 @@ import numpy as np
 
 from src import ids
 from src.ellipsometry_toolbox.ellipsometry import Ellipsometry
+from src.utils.file_manager import get_file_path
 
 logger = logging.getLogger(__name__)
 
@@ -197,7 +198,11 @@ def _calculate_z_min_max(selected_file, uploaded_files, z_key):
     if not selected_file or not uploaded_files or selected_file not in uploaded_files:
         return None
 
-    file = Ellipsometry.from_path_or_stream(uploaded_files[selected_file])
+    file_path = get_file_path(uploaded_files, selected_file)
+    if not file_path:
+        return None
+
+    file = Ellipsometry.from_path_or_stream(file_path)
     z_key = _resolve_z_key(file, z_key)
     if not z_key:
         return None
@@ -228,7 +233,11 @@ def set_z_scale_2sigma(n_clicks, selected_file, uploaded_files, settings):
     if not uploaded_files or selected_file not in uploaded_files:
         return no_update, no_update
 
-    file = Ellipsometry.from_path_or_stream(uploaded_files[selected_file])
+    file_path = get_file_path(uploaded_files, selected_file)
+    if not file_path:
+        return no_update, no_update
+
+    file = Ellipsometry.from_path_or_stream(file_path)
     z_key = settings.get("z_data_value") if settings else None
     z_key = _resolve_z_key(file, z_key)
     if not z_key:

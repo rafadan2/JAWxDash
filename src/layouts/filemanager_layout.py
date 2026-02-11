@@ -41,6 +41,15 @@ filemanager_layout = dbc.Card([
             clearable=False,
             className="mb-1",
         ),
+
+        # File title input
+        dbc.Label("Title", html_for=ids.Input.FILE_TITLE, className="mb-1"),
+        dbc.Input(
+            id=ids.Input.FILE_TITLE,
+            type="text",
+            placeholder="File title",
+            className="mb-1",
+        ),
     
         # File delete button
         dbc.Button(

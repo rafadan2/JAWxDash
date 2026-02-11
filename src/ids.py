@@ -28,6 +28,7 @@ class Graph:
 
 class Input:
     EDGE_EXCLUSION_DISTANCE = "input_edge_exclusion_distance"
+    FILE_TITLE = "input_file_title"
     Z_SCALE_MIN = "input_z_scale_min"
     Z_SCALE_MAX = "input_z_scale_max"
     MAPPATTERN_X = "input_mappattern_x"
