@@ -43,6 +43,7 @@ spot_layout = dbc.Card([
                         {"label": "|grad Z|", "value": "magnitude"},
                         {"label": "dZ/dX", "value": "dx"},
                         {"label": "dZ/dY", "value": "dy"},
+                        {"label": "Laplacian (d2Z/dX2 + d2Z/dY2)", "value": "laplacian"},
                     ],
                     multi=False,
                     clearable=False,

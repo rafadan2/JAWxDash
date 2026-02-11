@@ -56,6 +56,7 @@ def _gradient_label(gradient_mode, z_label):
         "magnitude": f"|grad({z_label})|",
         "dx": f"d({z_label})/dX",
         "dy": f"d({z_label})/dY",
+        "laplacian": f"d2({z_label})/dX2 + d2({z_label})/dY2",
     }
     return labels.get(gradient_mode, f"|grad({z_label})|")
 
@@ -169,6 +170,10 @@ def _build_gradient_map(x_data, y_data, z_data, gradient_mode, grid_mode="auto",
         gradient_grid = dz_dx
     elif gradient_mode == "dy":
         gradient_grid = dz_dy
+    elif gradient_mode == "laplacian":
+        d2z_dy2 = np.gradient(dz_dy, yi, axis=0, edge_order=1)
+        d2z_dx2 = np.gradient(dz_dx, xi, axis=1, edge_order=1)
+        gradient_grid = d2z_dx2 + d2z_dy2
     else:
         gradient_grid = np.hypot(dz_dx, dz_dy)
 
