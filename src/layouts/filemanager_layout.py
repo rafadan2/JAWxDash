@@ -57,6 +57,14 @@ filemanager_layout = dbc.Card([
                 color="danger",
                 className="mb-1 w-100"
         ),
+
+        dbc.Button(
+                "Batch Download Main Plots (PNG)",
+                id=ids.Button.BATCH_MAIN_PLOTS,
+                color="primary",
+                className="mb-1 w-100",
+                n_clicks=0,
+        ),
     ])
 ], className="mt-1")
 

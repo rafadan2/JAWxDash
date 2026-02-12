@@ -17,7 +17,8 @@ app = Dash(
     __name__, 
     requests_pathname_prefix="/ellipsometer/", 
     routes_pathname_prefix="/ellipsometer/",
-    external_stylesheets=[dbc.themes.BOOTSTRAP]
+    external_stylesheets=[dbc.themes.BOOTSTRAP],
+    external_scripts=["https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"],
 )
 app.server.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 10  # Allow for large file uploads 10MB
 

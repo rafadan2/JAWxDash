@@ -442,33 +442,14 @@ def build_batch_main_plot_payload(n_clicks, selected_file, uploaded_files, setti
         )
         return no_update
 
-    callback_t0 = time.perf_counter()
     settings = {**DEFAULT_SETTINGS, **(settings or {})}
 
-    logger.info(
-        "Batch main plot payload started for file='%s' (n_clicks=%s, gradient_mode=%s, marker_type=%s).",
-        selected_file,
-        n_clicks,
-        settings.get("gradient_mode"),
-        settings.get("marker_type"),
-    )
-
-    load_t0 = time.perf_counter()
     file = Ellipsometry.from_path_or_stream(uploaded_files[selected_file])
-    load_dt = time.perf_counter() - load_t0
 
-    point_count = len(file.data.index)
     z_keys = _resolve_batch_z_keys(file)
     if not z_keys:
         logger.warning("Batch main plot payload skipped: no z-parameter columns found in '%s'.", selected_file)
         return no_update
-
-    logger.info(
-        "Batch main plot payload: loaded %d points, %d z-parameters in %.3fs.",
-        point_count,
-        len(z_keys),
-        load_dt,
-    )
 
     stage_outline = None
     if settings.get("stage_state"):
@@ -478,9 +459,7 @@ def build_batch_main_plot_payload(n_clicks, selected_file, uploaded_files, setti
 
     root_name = _safe_filename_fragment(os.path.splitext(selected_file)[0])
     payload = []
-    build_total = 0.0
-    for idx, z_key in enumerate(z_keys, start=1):
-        build_t0 = time.perf_counter()
+    for z_key in z_keys:
         per_plot_settings = {**settings, "z_data_value": z_key}
         figure, _ = _build_main_figure(
             file,
@@ -489,8 +468,6 @@ def build_batch_main_plot_payload(n_clicks, selected_file, uploaded_files, setti
             force_two_sigma=True,
             stage_outline=stage_outline,
         )
-        build_dt = time.perf_counter() - build_t0
-        build_total += build_dt
 
         plot_name = _safe_filename_fragment(z_key)
         payload.append(
@@ -500,21 +477,6 @@ def build_batch_main_plot_payload(n_clicks, selected_file, uploaded_files, setti
             }
         )
 
-        logger.info(
-            "Batch main plot payload [%d/%d] z='%s': figure prepared in %.3fs.",
-            idx,
-            len(z_keys),
-            z_key,
-            build_dt,
-        )
-
-    callback_dt = time.perf_counter() - callback_t0
-    logger.info(
-        "Batch main plot payload completed: plots=%d, build_total=%.3fs, callback_total=%.3fs",
-        len(z_keys),
-        build_total,
-        callback_dt,
-    )
     return {
         "request_id": int(time.time() * 1000),
         "plots": payload,
@@ -532,10 +494,13 @@ clientside_callback(
             return noUpdate;
         }
 
-        if (typeof Plotly === "undefined" || typeof Plotly.downloadImage !== "function") {
-            return "Batch export failed: Plotly image download API is unavailable in the browser.";
+        if (typeof Plotly === "undefined" || typeof Plotly.toImage !== "function") {
+            return "Batch export failed: Plotly image export API is unavailable in the browser.";
         }
 
+        if (typeof window.JSZip === "undefined") {
+            return "Batch export failed: JSZip is unavailable in the browser.";
+        }
         const width = payload.width || 1400;
         const height = payload.height || 1000;
         const scale = payload.scale || 1;
@@ -549,9 +514,8 @@ clientside_callback(
         tempDiv.style.height = `${height}px`;
         document.body.appendChild(tempDiv);
 
-        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
         try {
+            const zip = new window.JSZip();
             let plotted = false;
             for (let idx = 0; idx < plots.length; idx++) {
                 const plot = plots[idx];
@@ -559,7 +523,6 @@ clientside_callback(
                 const data = figure.data || [];
                 const layout = figure.layout || {};
                 const filename = (plot.filename || `batch_plot_${idx + 1}.png`).replace(/\\.png$/i, "");
-                console.info(`[Batch main plots] exporting ${idx + 1}/${plots.length}: ${filename}.png`);
 
                 if (!plotted) {
                     await Plotly.newPlot(tempDiv, data, layout, {displayModeBar: false, responsive: false, staticPlot: true});
@@ -568,20 +531,30 @@ clientside_callback(
                     await Plotly.react(tempDiv, data, layout, {displayModeBar: false, responsive: false, staticPlot: true});
                 }
 
-                await Plotly.downloadImage(tempDiv, {
+                const pngDataUrl = await Plotly.toImage(tempDiv, {
                     format: "png",
-                    filename: filename,
                     width: width,
                     height: height,
                     scale: scale
                 });
-                console.info(`[Batch main plots] downloaded ${idx + 1}/${plots.length}: ${filename}.png`);
-
-                // Prevent browser download throttling when triggering many files quickly.
-                await sleep(120);
+                const base64Data = (pngDataUrl || "").split(",")[1];
+                if (!base64Data) {
+                    throw new Error(`PNG export failed for ${filename}.png.`);
+                }
+                zip.file(`${filename}.png`, base64Data, {base64: true});
             }
 
-            return `Batch main plots downloaded (${plots.length} PNG files).`;
+            const zipBlob = await zip.generateAsync({type: "blob"});
+            const zipUrl = URL.createObjectURL(zipBlob);
+            const anchor = document.createElement("a");
+            anchor.href = zipUrl;
+            anchor.download = "batch_plots.zip";
+            document.body.appendChild(anchor);
+            anchor.click();
+            anchor.remove();
+            URL.revokeObjectURL(zipUrl);
+
+            return `Batch main plots downloaded (batch_plots.zip with ${plots.length} PNG files).`;
         } catch (error) {
             const message = (error && error.message) ? error.message : String(error);
             console.error("Batch main plot browser export failed:", error);
