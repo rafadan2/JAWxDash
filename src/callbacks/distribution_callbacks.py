@@ -170,6 +170,35 @@ def _fit_line_trace(x_values, fit_result):
     return x_line, y_line
 
 
+def _sample_grid_at_points(x_points, y_points, xi, yi, value_grid):
+    x = np.asarray(x_points)
+    y = np.asarray(y_points)
+    xi = np.asarray(xi)
+    yi = np.asarray(yi)
+    grid = np.asarray(value_grid)
+
+    if x.size == 0:
+        return np.asarray([], dtype=float)
+    if xi.size < 2 or yi.size < 2 or grid.ndim != 2:
+        return np.full(x.shape, np.nan, dtype=float)
+
+    x_idx = np.searchsorted(xi, x, side="left")
+    x_idx = np.clip(x_idx, 1, xi.size - 1)
+    x_left = xi[x_idx - 1]
+    x_right = xi[x_idx]
+    use_right_x = np.abs(x - x_right) < np.abs(x - x_left)
+    x_idx = np.where(use_right_x, x_idx, x_idx - 1)
+
+    y_idx = np.searchsorted(yi, y, side="left")
+    y_idx = np.clip(y_idx, 1, yi.size - 1)
+    y_left = yi[y_idx - 1]
+    y_right = yi[y_idx]
+    use_right_y = np.abs(y - y_right) < np.abs(y - y_left)
+    y_idx = np.where(use_right_y, y_idx, y_idx - 1)
+
+    return grid[y_idx, x_idx]
+
+
 @callback(
     Output(ids.Graph.DISTRIBUTION_XY, "figure"),
     Output(ids.Graph.DISTRIBUTION_RESIDUALS, "figure"),
@@ -466,3 +495,479 @@ def update_distribution_tab(active_tab, selected_file, settings, stored_files):
     )
 
     return fig_xy, fig_residuals, fig_radial, metrics
+
+
+@callback(
+    Output(ids.Graph.GRADIENT_VIOLIN, "figure"),
+    Input(ids.Tabs.ANALYSIS, "active_tab"),
+    Input(ids.DropDown.UPLOADED_FILES, "value"),
+    Input(ids.Store.SETTINGS, "data"),
+    State(ids.Store.UPLOADED_FILES, "data"),
+)
+def update_gradient_violin_tab(active_tab, selected_file, settings, stored_files):
+    if active_tab != "gradient_violin":
+        return no_update
+
+    empty_figure = _empty_figure("Gradient Violin Plots", "|grad(Z)|", "Parameter")
+    if not selected_file or not stored_files or selected_file not in stored_files:
+        return empty_figure
+
+    file = Ellipsometry.from_path_or_stream(stored_files[selected_file])
+    active_settings = {**DEFAULT_SETTINGS, **(settings or {})}
+    if active_settings.get("ee_state"):
+        file = create_masked_file(file, active_settings)
+    if file.data.empty:
+        return empty_figure
+
+    if "x" not in file.data or "y" not in file.data:
+        return empty_figure
+
+    x_data = np.array(file.data["x"])
+    y_data = np.array(file.data["y"])
+    xy = rotate(np.vstack([x_data, y_data]), active_settings["mappattern_theta"])
+    xy = translate(xy, [active_settings["mappattern_x"], active_settings["mappattern_y"]])
+    x_data = xy[0, :]
+    y_data = xy[1, :]
+
+    parameter_columns = []
+    for column in file.data.columns:
+        if column in {"x", "y"}:
+            continue
+        column_values = file.data[column].to_numpy()
+        if np.issubdtype(np.asarray(column_values).dtype, np.number):
+            parameter_columns.append(column)
+    if not parameter_columns:
+        return empty_figure
+
+    violin_payload = []
+    for parameter in parameter_columns:
+        z_data = file.data[parameter].to_numpy()
+        gradient_result = _build_gradient_map(
+            x_data,
+            y_data,
+            z_data,
+            "magnitude",
+            grid_mode=active_settings.get("gradient_grid_mode", "auto"),
+            grid_size=active_settings.get("gradient_grid_size"),
+            k_nearest=active_settings.get("gradient_k_nearest"),
+        )
+        if not gradient_result:
+            continue
+
+        _, _, gradient_grid = gradient_result
+        gradient_values = gradient_grid[np.isfinite(gradient_grid)]
+        if gradient_values.size == 0:
+            continue
+
+        violin_payload.append((parameter, gradient_values))
+
+    if not violin_payload:
+        return empty_figure
+
+    vertical_spacing = min(0.12, max(0.03, 0.26 / len(violin_payload)))
+    fig = make_subplots(
+        rows=len(violin_payload),
+        cols=1,
+        shared_xaxes=False,
+        vertical_spacing=vertical_spacing,
+        subplot_titles=[parameter for parameter, _ in violin_payload],
+    )
+
+    for row_idx, (parameter, gradient_values) in enumerate(violin_payload, start=1):
+        fig.add_trace(
+            go.Violin(
+                x=gradient_values,
+                y=[parameter] * gradient_values.size,
+                orientation="h",
+                name=parameter,
+                box_visible=True,
+                meanline_visible=True,
+                points=False,
+                spanmode="hard",
+                showlegend=False,
+            ),
+            row=row_idx,
+            col=1,
+        )
+        fig.update_xaxes(
+            title_text=f"|grad({parameter})|",
+            automargin=True,
+            title_standoff=6,
+            matches=None,
+            row=row_idx,
+            col=1,
+        )
+        fig.update_yaxes(showticklabels=False, title_text="", row=row_idx, col=1)
+
+    fig.update_layout(
+        template="plotly_white",
+        title=dict(text="|grad(Z)| distribution by parameter", x=0.5, xanchor="center", pad=dict(t=10, b=8)),
+        margin=dict(l=55, r=30, t=95, b=80),
+        height=max(320, 220 * len(violin_payload) + 60),
+        showlegend=False,
+    )
+
+    return fig
+
+
+@callback(
+    Output(ids.Graph.SPATIAL_BIN_MAP, "figure"),
+    Output(ids.Graph.SPATIAL_BIN_TRENDS, "figure"),
+    Output(ids.Div.SPATIAL_BIN_COUNTS, "children"),
+    Input(ids.Tabs.ANALYSIS, "active_tab"),
+    Input(ids.DropDown.UPLOADED_FILES, "value"),
+    Input(ids.Store.SETTINGS, "data"),
+    Input(ids.Input.SPATIAL_BIN_RADIAL_COUNT, "value"),
+    Input(ids.Input.SPATIAL_BIN_ANGULAR_COUNT, "value"),
+    State(ids.Store.UPLOADED_FILES, "data"),
+)
+def update_spatial_binning_tab(
+    active_tab,
+    selected_file,
+    settings,
+    radial_bin_count,
+    angular_bin_count,
+    stored_files,
+):
+    if active_tab != "spatial_binning":
+        return no_update, no_update, no_update
+
+    empty_map = _empty_figure("Spatial Bins", "X (mm)", "Y (mm)")
+    empty_trend = _empty_figure("Bin Trends", "Bin number", "Value")
+
+    if not selected_file or not stored_files or selected_file not in stored_files:
+        return (
+            empty_map,
+            empty_trend,
+            html.Div("Select a file to analyze spatial bins.", className="text-muted"),
+        )
+
+    file = Ellipsometry.from_path_or_stream(stored_files[selected_file])
+    if file.data.empty or "x" not in file.data or "y" not in file.data:
+        return (
+            empty_map,
+            empty_trend,
+            html.Div("No valid data for spatial binning.", className="text-muted"),
+        )
+
+    active_settings = {**DEFAULT_SETTINGS, **(settings or {})}
+    z_key = _resolve_z_key(file, active_settings.get("z_data_value"))
+    if not z_key:
+        return (
+            empty_map,
+            empty_trend,
+            html.Div("No valid Z parameter available for spatial binning.", className="text-muted"),
+        )
+
+    x_data = np.array(file.data["x"])
+    y_data = np.array(file.data["y"])
+    z_data = file.data[z_key].to_numpy()
+
+    xy = rotate(np.vstack([x_data, y_data]), active_settings["mappattern_theta"])
+    xy = translate(xy, [active_settings["mappattern_x"], active_settings["mappattern_y"]])
+    x_data = xy[0, :]
+    y_data = xy[1, :]
+
+    gradient_mode = active_settings.get("gradient_mode", "none")
+    if gradient_mode == "none":
+        values = z_data
+        value_label = z_key
+    else:
+        gradient_result = _build_gradient_map(
+            x_data,
+            y_data,
+            z_data,
+            gradient_mode,
+            grid_mode=active_settings.get("gradient_grid_mode", "auto"),
+            grid_size=active_settings.get("gradient_grid_size"),
+            k_nearest=active_settings.get("gradient_k_nearest"),
+        )
+        if gradient_result:
+            xi, yi, gradient_grid = gradient_result
+            values = _sample_grid_at_points(x_data, y_data, xi, yi, gradient_grid)
+            value_label = _gradient_label(gradient_mode, z_key)
+        else:
+            values = z_data
+            value_label = z_key
+
+    keep_mask = np.isfinite(x_data) & np.isfinite(y_data) & np.isfinite(values)
+    x_mm = x_data[keep_mask] * 10.0
+    y_mm = y_data[keep_mask] * 10.0
+    values = np.asarray(values)[keep_mask]
+    if values.size == 0:
+        return (
+            empty_map,
+            empty_trend,
+            html.Div("No finite values for spatial binning.", className="text-muted"),
+        )
+
+    include_mask = np.ones(values.size, dtype=bool)
+    if active_settings.get("ee_state"):
+        masked_file = create_masked_file(file, active_settings)
+        included_idx = file.data.index.isin(masked_file.data.index)
+        include_mask = np.asarray(included_idx)[keep_mask]
+
+    x0_mm = _safe_float(active_settings.get("sample_x"), default=np.nan) * 10.0
+    y0_mm = _safe_float(active_settings.get("sample_y"), default=np.nan) * 10.0
+    center_source_x = x_mm[include_mask] if np.any(include_mask) else x_mm
+    center_source_y = y_mm[include_mask] if np.any(include_mask) else y_mm
+    if not np.isfinite(x0_mm):
+        x0_mm = float(np.median(center_source_x))
+    if not np.isfinite(y0_mm):
+        y0_mm = float(np.median(center_source_y))
+
+    dx = x_mm - x0_mm
+    dy = y_mm - y0_mm
+    radial_distance = np.sqrt(dx * dx + dy * dy)
+    angle = np.mod(np.arctan2(dy, dx), 2 * np.pi)
+
+    try:
+        n_radial = int(radial_bin_count)
+    except (TypeError, ValueError):
+        n_radial = 2
+    n_radial = int(np.clip(n_radial, 1, 40))
+
+    try:
+        n_angular = int(angular_bin_count)
+    except (TypeError, ValueError):
+        n_angular = 4
+    n_angular = int(np.clip(n_angular, 1, 72))
+
+    interior_bin_count = n_radial * n_angular
+    edge_bin_index = interior_bin_count
+    bin_index = np.full(values.size, -1, dtype=int)
+
+    radial_edges = np.zeros(n_radial + 1, dtype=float)
+    if np.any(include_mask):
+        radial_values = radial_distance[include_mask]
+        radial_edges = np.quantile(radial_values, np.linspace(0.0, 1.0, n_radial + 1))
+        radial_edges = np.maximum.accumulate(np.asarray(radial_edges, dtype=float))
+
+        radial_inner_edges = radial_edges[1:-1]
+        radial_bin = np.searchsorted(radial_inner_edges, radial_values, side="right")
+
+        angle_values = angle[include_mask]
+        angular_width = 2 * np.pi / n_angular
+        angular_bin = np.floor(angle_values / angular_width).astype(int)
+        angular_bin = np.clip(angular_bin, 0, n_angular - 1)
+
+        bin_index[include_mask] = radial_bin * n_angular + angular_bin
+
+    if active_settings.get("ee_state"):
+        excluded_mask = ~include_mask
+        bin_index[excluded_mask] = edge_bin_index
+
+    unassigned = bin_index < 0
+    if np.any(unassigned):
+        bin_index[unassigned] = edge_bin_index if active_settings.get("ee_state") else 0
+
+    interior_counts = np.asarray([np.sum(bin_index == i) for i in range(interior_bin_count)], dtype=int)
+    edge_count = int(np.sum(bin_index == edge_bin_index)) if active_settings.get("ee_state") else 0
+
+    map_fig = go.Figure()
+    for b in range(interior_bin_count):
+        count = int(interior_counts[b])
+        if count == 0:
+            continue
+        in_bin = bin_index == b
+        radial_id = b // n_angular + 1
+        angular_id = b % n_angular + 1
+        map_fig.add_trace(
+            go.Scatter(
+                x=x_mm[in_bin],
+                y=y_mm[in_bin],
+                mode="markers",
+                marker=dict(size=6, opacity=0.65),
+                name=f"Bin {b + 1} (n={count})",
+                hovertemplate=(
+                    f"Bin {b + 1} (R{radial_id}, A{angular_id})"
+                    + "<br>x: %{x:.3f} mm<br>y: %{y:.3f} mm<br>"
+                    + f"{value_label}: %{{customdata:.6g}}<extra></extra>"
+                ),
+                customdata=values[in_bin],
+            )
+        )
+
+    if active_settings.get("ee_state") and edge_count > 0:
+        excluded_mask = bin_index == edge_bin_index
+        map_fig.add_trace(
+            go.Scatter(
+                x=x_mm[excluded_mask],
+                y=y_mm[excluded_mask],
+                mode="markers",
+                marker=dict(size=6, opacity=0.6, color="rgba(150,150,150,0.8)"),
+                name=f"Edge excluded (n={edge_count})",
+                hovertemplate="Edge excluded<br>x: %{x:.3f} mm<br>y: %{y:.3f} mm<br>"
+                + f"{value_label}: %{{customdata:.6g}}<extra></extra>",
+                customdata=values[excluded_mask],
+            )
+        )
+
+    max_radius = float(np.nanmax(radial_distance)) if radial_distance.size else 0.0
+    for ring_radius in radial_edges[1:-1]:
+        if np.isfinite(ring_radius) and ring_radius > 0:
+            map_fig.add_shape(
+                type="circle",
+                xref="x",
+                yref="y",
+                x0=x0_mm - ring_radius,
+                x1=x0_mm + ring_radius,
+                y0=y0_mm - ring_radius,
+                y1=y0_mm + ring_radius,
+                line=dict(color="rgba(30, 30, 30, 0.35)", width=1, dash="dot"),
+            )
+
+    for section_idx in range(n_angular):
+        theta = 2 * np.pi * section_idx / n_angular
+        x_end = x0_mm + max_radius * np.cos(theta)
+        y_end = y0_mm + max_radius * np.sin(theta)
+        map_fig.add_shape(
+            type="line",
+            xref="x",
+            yref="y",
+            x0=x0_mm,
+            y0=y0_mm,
+            x1=x_end,
+            y1=y_end,
+            line=dict(color="rgba(30, 30, 30, 0.35)", width=1, dash="dot"),
+        )
+
+    map_fig.add_trace(
+        go.Scatter(
+            x=[x0_mm],
+            y=[y0_mm],
+            mode="markers",
+            marker=dict(symbol="x", size=11, color="black"),
+            name="Bin center",
+            hovertemplate="Center<br>x: %{x:.3f} mm<br>y: %{y:.3f} mm<extra></extra>",
+        )
+    )
+    map_fig.update_layout(
+        template="plotly_white",
+        title=dict(text="Spatial bin map (radial x angular)", x=0.5, xanchor="center", pad=dict(t=10, b=6)),
+        margin=dict(l=55, r=30, t=95, b=110),
+        legend=dict(
+            orientation="h",
+            yanchor="top",
+            y=-0.22,
+            xanchor="left",
+            x=0,
+            bgcolor="rgba(255,255,255,0.85)",
+        ),
+    )
+    map_fig.update_xaxes(title_text="X (mm)", automargin=True, title_standoff=8, scaleanchor="y", scaleratio=1)
+    map_fig.update_yaxes(title_text="Y (mm)", automargin=True, title_standoff=8)
+
+    trend_fig = go.Figure()
+    rng = np.random.default_rng(2026)
+    all_bin_indices = list(range(interior_bin_count))
+    bin_positions = {b: b + 1 for b in all_bin_indices}
+    tick_vals = [b + 1 for b in all_bin_indices]
+    tick_text = [str(b + 1) for b in all_bin_indices]
+    if active_settings.get("ee_state"):
+        all_bin_indices.append(edge_bin_index)
+        bin_positions[edge_bin_index] = interior_bin_count + 1
+        tick_vals.append(interior_bin_count + 1)
+        tick_text.append("EE")
+
+    mean_x = []
+    mean_y = []
+    mean_std = []
+
+    for b in all_bin_indices:
+        in_bin = bin_index == b
+        y_bin = values[in_bin]
+        count = int(y_bin.size)
+        x_pos = bin_positions[b]
+        if count == 0:
+            mean_x.append(x_pos)
+            mean_y.append(np.nan)
+            mean_std.append(0.0)
+            continue
+
+        mean_x.append(x_pos)
+        mean_y.append(float(np.mean(y_bin)))
+        mean_std.append(float(np.std(y_bin, ddof=1)) if count > 1 else 0.0)
+
+        jitter_x = np.full(y_bin.size, x_pos, dtype=float) + rng.uniform(-0.18, 0.18, size=y_bin.size)
+        series_name = "Edge excluded raw" if b == edge_bin_index else f"Bin {b + 1} raw"
+        trend_fig.add_trace(
+            go.Scatter(
+                x=jitter_x,
+                y=y_bin,
+                mode="markers",
+                marker=dict(size=5, opacity=0.3),
+                name=series_name,
+                showlegend=False,
+                hovertemplate=(
+                    ("Edge excluded" if b == edge_bin_index else f"Bin {b + 1}")
+                    + f"<br>{value_label}: "
+                    + "%{y:.6g}<extra></extra>"
+                ),
+            )
+        )
+
+    trend_fig.add_trace(
+        go.Scatter(
+            x=np.asarray(mean_x),
+            y=np.asarray(mean_y),
+            mode="lines+markers",
+            line=dict(width=2, color="black"),
+            marker=dict(size=7),
+            error_y=dict(type="data", array=np.asarray(mean_std), visible=True),
+            name="Bin mean +/- std",
+            hovertemplate="Section %{x}<br>Mean: %{y:.6g}<extra></extra>",
+        )
+    )
+    trend_fig.update_layout(
+        template="plotly_white",
+        title=dict(text="Data and trend by spatial section", x=0.5, xanchor="center", pad=dict(t=10, b=6)),
+        margin=dict(l=55, r=30, t=95, b=85),
+        showlegend=False,
+    )
+    trend_fig.update_xaxes(
+        title_text="Section number",
+        automargin=True,
+        title_standoff=8,
+        tickmode="array",
+        tickvals=tick_vals,
+        ticktext=tick_text,
+        range=[0.5, tick_vals[-1] + 0.5],
+    )
+    trend_fig.update_yaxes(title_text=value_label, automargin=True, title_standoff=8)
+
+    radial_lines = []
+    for radial_idx in range(n_radial):
+        r_min = radial_edges[radial_idx]
+        r_max = radial_edges[radial_idx + 1]
+        radial_lines.append(
+            html.Div(
+                f"Radial bin {radial_idx + 1}: r = [{r_min:.4g}, {r_max:.4g}] mm"
+            )
+        )
+
+    count_lines = []
+    for b in range(interior_bin_count):
+        radial_id = b // n_angular + 1
+        angular_id = b % n_angular + 1
+        count_lines.append(
+            html.Div(
+                f"Bin {b + 1} (R{radial_id}, A{angular_id}): {int(interior_counts[b])} points"
+            )
+        )
+    if active_settings.get("ee_state"):
+        count_lines.append(html.Div(f"Edge excluded (EE): {edge_count} points"))
+
+    count_panel = html.Div(
+        [
+            html.Div(html.Strong("Spatial bin summary")),
+            html.Div(f"Scheme: {n_radial} radial bins x {n_angular} angular bins = {interior_bin_count} interior sections"),
+            html.Div(f"Center used: ({x0_mm:.3f} mm, {y0_mm:.3f} mm)"),
+            html.Div(f"Total points analyzed: {values.size}"),
+            html.Div("Radial boundaries are quantile-based on non-edge points for near-equal occupancy."),
+            *radial_lines,
+            *count_lines,
+        ]
+    )
+
+    return map_fig, trend_fig, count_panel

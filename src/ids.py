@@ -10,6 +10,7 @@ class Div:
     INFO = "div_info"
     STAT_TABLE = "div_stat_table"
     DISTRIBUTION_METRICS = "div_distribution_metrics"
+    SPATIAL_BIN_COUNTS = "div_spatial_bin_counts"
 
 
 class Download:
@@ -29,6 +30,9 @@ class Graph:
     DISTRIBUTION_XY = "graph_distribution_xy"
     DISTRIBUTION_RESIDUALS = "graph_distribution_residuals"
     DISTRIBUTION_RADIAL = "graph_distribution_radial"
+    GRADIENT_VIOLIN = "graph_gradient_violin"
+    SPATIAL_BIN_MAP = "graph_spatial_bin_map"
+    SPATIAL_BIN_TRENDS = "graph_spatial_bin_trends"
 
 
 class Input:
@@ -44,6 +48,8 @@ class Input:
     SAMPLE_RADIUS = "input_sample_radius"
     SAMPLE_WIDTH = "input_sample_width"
     SAMPLE_HEIGHT = "input_sample_height"
+    SPATIAL_BIN_RADIAL_COUNT = "input_spatial_bin_radial_count"
+    SPATIAL_BIN_ANGULAR_COUNT = "input_spatial_bin_angular_count"
 
 
 class RadioItems:

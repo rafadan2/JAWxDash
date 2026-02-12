@@ -1,4 +1,4 @@
-from dash import callback, dash_table, Output, Input, State
+from dash import callback, dash_table, html, Output, Input, State
 from dash.dash_table.Format import Format, Scheme
 import logging
 
@@ -7,6 +7,7 @@ import logging
 from src import ids
 from src.ellipsometry_toolbox.ellipsometry import Ellipsometry
 from src.ellipsometry_toolbox.masking import create_masked_file
+from src.templates.settings_template import DEFAULT_SETTINGS
 
 
 logger = logging.getLogger(__name__)
@@ -20,17 +21,28 @@ logger = logging.getLogger(__name__)
 )
 def update_stat_table(selected_file, settings, stored_files):
 
-    if not selected_file:
+    if not selected_file or not stored_files or selected_file not in stored_files:
         return None
     
     file = Ellipsometry.from_path_or_stream(stored_files[selected_file])
+    active_settings = {**DEFAULT_SETTINGS, **(settings or {})}
 
-    if settings["ee_state"]:
-        file = create_masked_file(file, settings)
+    if active_settings.get("ee_state"):
+        file = create_masked_file(file, active_settings)
 
+    if file.data.empty:
+        return html.Div("No data available with current edge-exclusion settings.", className="text-muted")
 
-    stats = file.statistics()
-    stats.drop(columns=["x", "y"], inplace=True)
+    try:
+        stats = file.statistics()
+    except ValueError:
+        return html.Div("No numeric columns available for statistics.", className="text-muted")
+
+    for column in ("x", "y"):
+        if column in stats.columns:
+            stats.drop(columns=[column], inplace=True)
+    if stats.shape[1] == 0:
+        return html.Div("No parameter columns available for statistics.", className="text-muted")
     
 
     columns = [{"id": col, "name": col, "type": "numeric", "format": Format(precision=3, scheme=Scheme.fixed)} for col in stats.columns]
@@ -46,7 +58,7 @@ def update_stat_table(selected_file, settings, stored_files):
         style_table={'overflowX': 'auto'},
         style_cell={'padding': '8px', 'textAlign': 'right'},
         style_header={'backgroundColor': 'lightgrey', 'fontWeight': 'bold'}
-    ),
+    )
 
 
     return table

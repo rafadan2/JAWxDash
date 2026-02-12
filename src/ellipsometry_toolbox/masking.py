@@ -10,48 +10,129 @@ logger = logging.getLogger(__name__)
 
 
 def create_masked_file(file:Ellipsometry, settings:dict) -> Ellipsometry:
+    out_file = copy(file)
 
+    if file.data.empty:
+        out_file.data = file.data.copy()
+        return out_file
+
+    if "x" not in file.data or "y" not in file.data:
+        logger.warning("Edge exclusion skipped: file is missing x/y columns.")
+        out_file.data = file.data.copy()
+        return out_file
 
     # Getting instrumented coordinate of the measurement
     xy_off = file.offset(
-        x=settings["mappattern_x"],
-        y=settings["mappattern_y"],
-        theta=settings["mappattern_theta"],
+        x=settings.get("mappattern_x", 0.0),
+        y=settings.get("mappattern_y", 0.0),
+        theta=settings.get("mappattern_theta", 0.0),
     )
 
-    
+    x_data = xy_off[:, 0]
+    y_data = xy_off[:, 1]
+    point_count = len(file.data.index)
 
-    if settings["ee_type"] == "radial" and settings["sample_outline"] == "sector":
+    sample_outline = settings.get("sample_outline")
+    ee_type = settings.get("ee_type")
+    ee_distance = settings.get("ee_distance", 0.0)
+    try:
+        edge_distance = float(ee_distance)
+    except (TypeError, ValueError):
+        edge_distance = 0.0
+    if not np.isfinite(edge_distance):
+        edge_distance = 0.0
+    edge_distance = max(0.0, edge_distance)
 
-        # Sector parameters
-        cx, cy = settings["sample_x"], settings["sample_y"]  # center
-        radius = (settings["sample_radius"] - settings["ee_distance"])
-        angle_start = np.deg2rad(settings["sample_theta"])  # in radians
-        angle_end = angle_start + 0.5*np.pi
+    full_mask = np.ones(point_count, dtype=bool)
+    empty_mask = np.zeros(point_count, dtype=bool)
+    eps = 1e-12
 
+    if sample_outline == "circle":
+        cx = float(settings.get("sample_x", 0.0))
+        cy = float(settings.get("sample_y", 0.0))
+        inner_radius = float(settings.get("sample_radius", 0.0)) - edge_distance
+        if inner_radius <= 0:
+            mask = empty_mask
+        else:
+            dx = x_data - cx
+            dy = y_data - cy
+            mask = (dx * dx + dy * dy) <= (inner_radius * inner_radius + eps)
 
-        # Polar coordinates
-        dx = xy_off[:,0] - cx
-        dy = xy_off[:,1] - cy
-        r = np.sqrt(dx**2 + dy**2)
-        theta = np.arctan2(dy, dx)
+    elif sample_outline == "rectangle_corner":
+        if ee_type != "uniform":
+            logger.warning("Edge exclusion type '%s' for outline '%s' is not implemented for data masking. Using unmasked data.", ee_type, sample_outline)
+            mask = full_mask
+        else:
+            x0 = float(settings.get("sample_x", 0.0))
+            y0 = float(settings.get("sample_y", 0.0))
+            theta = float(settings.get("sample_theta", 0.0))
+            width = float(settings.get("sample_width", 0.0))
+            height = float(settings.get("sample_height", 0.0))
 
+            x_min = edge_distance
+            y_min = edge_distance
+            x_max = width - edge_distance
+            y_max = height - edge_distance
+            if x_max <= x_min or y_max <= y_min:
+                mask = empty_mask
+            else:
+                theta_rad = np.deg2rad(theta)
+                cos_t = np.cos(theta_rad)
+                sin_t = np.sin(theta_rad)
+                dx = x_data - x0
+                dy = y_data - y0
 
-        # Normalize angle to [0, 2pi]
-        theta = (theta + 2 * np.pi) % (2 * np.pi)
+                # Transform world coordinates back to local rectangle coordinates.
+                x_local = cos_t * dx + sin_t * dy
+                y_local = -sin_t * dx + cos_t * dy
 
-        mask = (r <= radius) & (theta >= angle_start) & (theta <= angle_end)
+                mask = (
+                    (x_local >= x_min - eps)
+                    & (x_local <= x_max + eps)
+                    & (y_local >= y_min - eps)
+                    & (y_local <= y_max + eps)
+                )
 
+    elif sample_outline == "sector":
+        cx = float(settings.get("sample_x", 0.0))
+        cy = float(settings.get("sample_y", 0.0))
+        outer_radius = float(settings.get("sample_radius", 0.0))
+        inner_radius = outer_radius - edge_distance
+        theta_start = np.deg2rad(float(settings.get("sample_theta", 0.0)))
+        theta_end = theta_start + 0.5 * np.pi
 
+        dx = x_data - cx
+        dy = y_data - cy
+        r = np.sqrt(dx * dx + dy * dy)
+
+        e1x, e1y = np.cos(theta_start), np.sin(theta_start)
+        e2x, e2y = np.cos(theta_end), np.sin(theta_end)
+        cross_start = e1x * dy - e1y * dx
+        cross_end = e2x * dy - e2y * dx
+
+        if inner_radius <= 0:
+            mask = empty_mask
+        elif ee_type == "radial":
+            mask = (r <= inner_radius + eps) & (cross_start >= -eps) & (cross_end <= eps)
+        elif ee_type == "uniform":
+            mask = (
+                (r <= inner_radius + eps)
+                & (cross_start >= edge_distance - eps)
+                & (cross_end <= -(edge_distance - eps))
+            )
+        else:
+            logger.warning("Edge exclusion type '%s' for outline '%s' is not implemented for data masking. Using unmasked data.", ee_type, sample_outline)
+            mask = full_mask
 
     else:
-        logger.error("Exclusion type: %s for sample outline: %s, not implemented" % (settings["ee_type"], settings["sample_outline"]))
-        mask = []
+        logger.warning("Sample outline '%s' is not implemented for data masking. Using unmasked data.", sample_outline)
+        mask = full_mask
 
+    if mask.shape[0] != point_count:
+        logger.error("Invalid edge-exclusion mask shape %s for %s points. Using unmasked data.", mask.shape, point_count)
+        mask = full_mask
 
-    out_file = copy(file)
-    out_file.data = file.data[mask]
-
+    out_file.data = file.data.loc[mask].copy()
 
     return out_file
 
