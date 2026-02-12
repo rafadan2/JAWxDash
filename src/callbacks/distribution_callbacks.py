@@ -765,6 +765,9 @@ def update_spatial_binning_tab(
     edge_count = int(np.sum(bin_index == edge_bin_index)) if active_settings.get("ee_state") else 0
 
     map_fig = go.Figure()
+    label_x = []
+    label_y = []
+    label_text = []
     for b in range(interior_bin_count):
         count = int(interior_counts[b])
         if count == 0:
@@ -787,6 +790,9 @@ def update_spatial_binning_tab(
                 customdata=values[in_bin],
             )
         )
+        label_x.append(float(np.mean(x_mm[in_bin])))
+        label_y.append(float(np.mean(y_mm[in_bin])))
+        label_text.append(str(b + 1))
 
     if active_settings.get("ee_state") and edge_count > 0:
         excluded_mask = bin_index == edge_bin_index
@@ -802,6 +808,9 @@ def update_spatial_binning_tab(
                 customdata=values[excluded_mask],
             )
         )
+        label_x.append(float(np.mean(x_mm[excluded_mask])))
+        label_y.append(float(np.mean(y_mm[excluded_mask])))
+        label_text.append("EE")
 
     max_radius = float(np.nanmax(radial_distance)) if radial_distance.size else 0.0
     for ring_radius in radial_edges[1:-1]:
@@ -842,6 +851,20 @@ def update_spatial_binning_tab(
             hovertemplate="Center<br>x: %{x:.3f} mm<br>y: %{y:.3f} mm<extra></extra>",
         )
     )
+    if label_text:
+        map_fig.add_trace(
+            go.Scatter(
+                x=np.asarray(label_x),
+                y=np.asarray(label_y),
+                mode="text",
+                text=label_text,
+                textposition="middle center",
+                textfont=dict(size=13, color="black"),
+                name="Bin labels",
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
     map_fig.update_layout(
         template="plotly_white",
         title=dict(text="Spatial bin map (radial x angular)", x=0.5, xanchor="center", pad=dict(t=10, b=6)),
