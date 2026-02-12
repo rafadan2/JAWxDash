@@ -442,11 +442,19 @@ def set_z_scale_2sigma(n_clicks, z_key, gradient_mode, gradient_grid_mode, gradi
 
     median = float(np.nanmedian(active_values))
     sigma = float(np.nanstd(active_values))
+    zmin = float(np.nanmin(active_values))
+    zmax = float(np.nanmax(active_values))
 
-    if not np.isfinite(median) or not np.isfinite(sigma):
+    if not np.isfinite(median) or not np.isfinite(sigma) or not np.isfinite(zmin) or not np.isfinite(zmax):
         return no_update, no_update
 
-    return median - 2 * sigma, median + 2 * sigma
+    lower = max(zmin, median - 2 * sigma)
+    upper = min(zmax, median + 2 * sigma)
+
+    if lower > upper:
+        return zmin, zmax
+
+    return lower, upper
 
 
 @callback(
