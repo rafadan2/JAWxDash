@@ -261,7 +261,15 @@ spot_layout = dbc.Card([
                 step=1,
                 className="mb-0",
             )
-        )
+        ),
+
+        dbc.Button(
+            "Batch Main Plots (PNG)",
+            id=ids.Button.BATCH_MAIN_PLOTS,
+            color="primary",
+            className="mt-2 w-100",
+            n_clicks=0,
+        ),
 
     ])
 ], className="mt-1")

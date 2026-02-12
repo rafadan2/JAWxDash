@@ -1,10 +1,13 @@
 # Library imports
-from dash import callback, Output, Input, State, no_update
+from dash import callback, Output, Input, State, clientside_callback, no_update
 import plotly.graph_objs as go
 import plotly.express as px
 import numpy as np
 import logging
 import os 
+import json
+import re
+import time
 
 
 # Local imports
@@ -31,6 +34,9 @@ GRID_SIZE_AUTO_MAX = 160
 GRID_SIZE_AUTO_MAX_DENSE = 100
 K_NEAREST_MIN = 4
 K_NEAREST_MAX = 64
+EXPORT_IMAGE_WIDTH = 1400
+EXPORT_IMAGE_HEIGHT = 1000
+EXPORT_IMAGE_SCALE = 1
 
 
 # Adding a placeholder for sample outline
@@ -179,6 +185,198 @@ def _build_gradient_map(x_data, y_data, z_data, gradient_mode, grid_mode="auto",
 
     return xi, yi, gradient_grid
 
+
+def _resolve_z_limits(active_data, z_scale_min, z_scale_max, force_two_sigma=False):
+    if active_data.size:
+        auto_min = float(np.nanmin(active_data))
+        auto_max = float(np.nanmax(active_data))
+    else:
+        auto_min = np.nan
+        auto_max = np.nan
+
+    if force_two_sigma:
+        median = float(np.nanmedian(active_data)) if active_data.size else np.nan
+        sigma = float(np.nanstd(active_data)) if active_data.size else np.nan
+        if np.isfinite(median) and np.isfinite(sigma) and np.isfinite(auto_min) and np.isfinite(auto_max):
+            lower = max(auto_min, median - 2 * sigma)
+            upper = min(auto_max, median + 2 * sigma)
+            if lower <= upper:
+                return lower, upper, True
+
+        return auto_min, auto_max, np.isfinite(auto_min) and np.isfinite(auto_max) and auto_min < auto_max
+
+    zmin = auto_min if z_scale_min is None else z_scale_min
+    zmax = auto_max if z_scale_max is None else z_scale_max
+    manual_scale = (z_scale_min is not None) or (z_scale_max is not None)
+
+    if not np.isfinite(zmin) or not np.isfinite(zmax) or zmin >= zmax:
+        return auto_min, auto_max, False
+
+    return zmin, zmax, manual_scale
+
+
+def _clone_shapes(shapes):
+    return [shape.copy() for shape in shapes]
+
+
+def _resolve_batch_z_keys(file):
+    return [column for column in sorted(file.get_column_names()) if column.lower() not in {"x", "y"}]
+
+
+def _safe_filename_fragment(value):
+    sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value).strip())
+    sanitized = sanitized.strip("._-")
+    return sanitized or "plot"
+
+
+def _build_main_figure(file, settings, z_label=None, force_two_sigma=False, stage_outline=None):
+    figure = go.Figure(
+        layout=go.Layout(
+            FIGURE_LAYOUT
+        ),
+    )
+    settings = {**DEFAULT_SETTINGS, **(settings or {})}
+
+    z_label = _resolve_z_key(file, z_label or settings.get("z_data_value"))
+    if not z_label:
+        return figure, None
+
+    x_data = np.array(file.data["x"])
+    y_data = np.array(file.data["y"])
+
+    xy = rotate(np.vstack([x_data, y_data]), settings["mappattern_theta"])
+    xy = translate(xy, [settings["mappattern_x"], settings["mappattern_y"]])
+    x_data = xy[0, :]
+    y_data = xy[1, :]
+
+    z_data = file.data[z_label].to_numpy()
+
+    gradient_mode = settings.get("gradient_mode", "none")
+    gradient_grid_mode = settings.get("gradient_grid_mode", "auto")
+    gradient_grid_size = settings.get("gradient_grid_size")
+    gradient_k_nearest = settings.get("gradient_k_nearest")
+    use_gradient_map = gradient_mode != "none"
+    gradient_result = (
+        _build_gradient_map(
+            x_data,
+            y_data,
+            z_data,
+            gradient_mode,
+            grid_mode=gradient_grid_mode,
+            grid_size=gradient_grid_size,
+            k_nearest=gradient_k_nearest,
+        )
+        if use_gradient_map
+        else None
+    )
+
+    if use_gradient_map and gradient_result:
+        _, _, gradient_grid = gradient_result
+        active_data = gradient_grid[np.isfinite(gradient_grid)]
+        colorbar_label = _gradient_label(gradient_mode, z_label)
+    else:
+        use_gradient_map = False
+        active_data = z_data[np.isfinite(z_data)]
+        colorbar_label = z_label
+
+    zmin, zmax, manual_scale = _resolve_z_limits(
+        active_data,
+        settings.get("z_scale_min"),
+        settings.get("z_scale_max"),
+        force_two_sigma=force_two_sigma,
+    )
+
+    colorbar_title = dict(title=dict(text=colorbar_label, side="top"))
+
+    shapes = []
+
+    if use_gradient_map and gradient_result:
+        xi, yi, gradient_grid = gradient_result
+        gradient_trace = dict(
+            x=xi,
+            y=yi,
+            z=gradient_grid,
+            colorscale=settings["colormap_value"],
+            colorbar=colorbar_title,
+            hovertemplate=f"x: %{{x}}<br>y: %{{y}}<br>{colorbar_label}: %{{z}}<extra></extra>",
+            showscale=True,
+            connectgaps=False,
+        )
+        if manual_scale:
+            gradient_trace.update(zmin=zmin, zmax=zmax, zauto=False)
+
+        figure.add_trace(go.Heatmap(**gradient_trace))
+    else:
+        is_ellipse = settings["marker_type"] == "ellipse"
+
+        marker = dict(
+            size=settings["marker_size"],
+            opacity=0 if is_ellipse else 1,
+            color=z_data,
+            colorscale=settings["colormap_value"],
+            colorbar=colorbar_title,
+            showscale=True,
+        )
+        if manual_scale:
+            marker.update(cmin=zmin, cmax=zmax, cauto=False)
+
+        primary_trace = dict(
+            x=x_data,
+            y=y_data,
+            mode='markers',
+            marker=marker,
+            hovertemplate="x: %{x}<br>y: %{y}<br>z: %{marker.color}<extra></extra>",
+            showlegend=False,
+        )
+
+        figure.add_trace(go.Scatter(**primary_trace))
+
+        if is_ellipse:
+            d_min, d_max = zmin, zmax
+
+            if d_max > d_min:
+                norm_zdata = (z_data - d_min) / (d_max - d_min)
+                norm_zdata = np.clip(norm_zdata, 0, 1)
+            else:
+                norm_zdata = np.zeros_like(z_data, dtype=float)
+            colors = px.colors.sample_colorscale(
+                colorscale=settings["colormap_value"],
+                samplepoints=norm_zdata
+            )
+
+            shapes.extend(
+                [gen_spot(x, y, c, settings["spot_size"], settings["angle_of_incident"]) for x, y, c in zip(x_data, y_data, colors)]
+            )
+
+    if settings["sample_outline"]:
+        shapes.append(generate_outline(settings))
+
+    if settings["stage_state"]:
+        if stage_outline is None:
+            cwd = os.getcwd()
+            dxf_file = os.path.join(cwd, "src/assets/jaw_stage_outline.dxf")
+            stage_outline = dxf_to_path(dxf_file)
+        shapes.extend(_clone_shapes(stage_outline))
+
+    if settings["sample_outline"] and settings["ee_state"]:
+        if settings["ee_type"] == "radial":
+            shapes.append(radial_edge_exclusion_outline(settings))
+        elif settings["ee_type"] == "uniform":
+            shapes.append(uniform_edge_exclusion_outline(settings))
+
+    xmin, xmax = min(x_data), max(x_data)
+    ymin, ymax = min(y_data), max(y_data)
+    scale_factor = 0.2
+    scale_range = xmax - xmin
+
+    figure.update_layout(
+        shapes=shapes,
+        xaxis=dict(range=[xmin - scale_factor * scale_range, xmax + scale_factor * scale_range]),
+        yaxis=dict(range=[ymin - scale_factor * scale_range, ymax + scale_factor * scale_range]),
+    )
+
+    return figure, z_label
+
 @callback(
         Output(ids.Graph.MAIN, "figure"),
         Output(ids.DropDown.Z_DATA, "options"),
@@ -207,188 +405,196 @@ def update_figure(selected_file:str, uploaded_files:dict, settings:dict):
         - theta
     """
     
-    # Setting up an empty figure
-    figure = go.Figure(
-        layout=go.Layout(
-            FIGURE_LAYOUT  # Joining the template with the updates
-        ),
-    )
+    figure = go.Figure(layout=go.Layout(FIGURE_LAYOUT))
     settings = {**DEFAULT_SETTINGS, **(settings or {})}
 
-    # If no file or z-data-value selected, return an empty figure
     if not selected_file:
         return no_update, no_update
-    
+
     if not uploaded_files or selected_file not in uploaded_files:
         return figure, no_update
-    
-    # A sample has been selected, now let's unpack
+
     file = Ellipsometry.from_path_or_stream(uploaded_files[selected_file])
+    z_options = sorted(file.get_column_names())
 
-    # Resolve selected z-data for active file.
-    z_label = _resolve_z_key(file, settings.get("z_data_value"))
-    if not z_label:
-        return figure, sorted(file.get_column_names())
+    rendered_figure, _ = _build_main_figure(file, settings, z_label=settings.get("z_data_value"))
 
-    
-    # exposing x,y,z data directly
-    x_data = np.array(file.data["x"])
-    y_data = np.array(file.data["y"])
+    return rendered_figure, z_options
 
-    xy = rotate(np.vstack([x_data, y_data]), settings["mappattern_theta"])
-    xy = translate(xy, [settings["mappattern_x"], settings["mappattern_y"]])
-    x_data = xy[0,:]
-    y_data = xy[1,:]
-    
-    z_data = file.data[z_label].to_numpy()
 
-    gradient_mode = settings.get("gradient_mode", "none")
-    gradient_grid_mode = settings.get("gradient_grid_mode", "auto")
-    gradient_grid_size = settings.get("gradient_grid_size")
-    gradient_k_nearest = settings.get("gradient_k_nearest")
-    use_gradient_map = gradient_mode != "none"
-    gradient_result = (
-        _build_gradient_map(
-            x_data,
-            y_data,
-            z_data,
-            gradient_mode,
-            grid_mode=gradient_grid_mode,
-            grid_size=gradient_grid_size,
-            k_nearest=gradient_k_nearest,
+@callback(
+    Output(ids.Store.BATCH_MAIN_PLOTS_PAYLOAD, "data"),
+    Input(ids.Button.BATCH_MAIN_PLOTS, "n_clicks"),
+    State(ids.DropDown.UPLOADED_FILES, "value"),
+    State(ids.Store.UPLOADED_FILES, "data"),
+    State(ids.Store.SETTINGS, "data"),
+    prevent_initial_call=True,
+)
+def build_batch_main_plot_payload(n_clicks, selected_file, uploaded_files, settings):
+    if not n_clicks:
+        return no_update
+
+    if not selected_file or not uploaded_files or selected_file not in uploaded_files:
+        logger.warning(
+            "Batch main plot payload skipped: selected_file=%s, uploaded_files_present=%s",
+            selected_file,
+            bool(uploaded_files),
         )
-        if use_gradient_map
-        else None
+        return no_update
+
+    callback_t0 = time.perf_counter()
+    settings = {**DEFAULT_SETTINGS, **(settings or {})}
+
+    logger.info(
+        "Batch main plot payload started for file='%s' (n_clicks=%s, gradient_mode=%s, marker_type=%s).",
+        selected_file,
+        n_clicks,
+        settings.get("gradient_mode"),
+        settings.get("marker_type"),
     )
 
-    if use_gradient_map and gradient_result:
-        xi, yi, gradient_grid = gradient_result
-        active_data = gradient_grid[np.isfinite(gradient_grid)]
-        colorbar_label = _gradient_label(gradient_mode, z_label)
-    else:
-        use_gradient_map = False
-        active_data = z_data[np.isfinite(z_data)]
-        colorbar_label = z_label
-    
-    colorbar_title = dict(title=dict(text=colorbar_label, side="top"))
-    
-    z_scale_min = settings.get("z_scale_min")
-    z_scale_max = settings.get("z_scale_max")
-    if active_data.size:
-        auto_min = float(np.nanmin(active_data))
-        auto_max = float(np.nanmax(active_data))
-    else:
-        auto_min = np.nan
-        auto_max = np.nan
-    zmin = auto_min if z_scale_min is None else z_scale_min
-    zmax = auto_max if z_scale_max is None else z_scale_max
-    manual_scale = (z_scale_min is not None) or (z_scale_max is not None)
+    load_t0 = time.perf_counter()
+    file = Ellipsometry.from_path_or_stream(uploaded_files[selected_file])
+    load_dt = time.perf_counter() - load_t0
 
-    if not np.isfinite(zmin) or not np.isfinite(zmax) or zmin >= zmax:
-        zmin, zmax = auto_min, auto_max
-        manual_scale = False
+    point_count = len(file.data.index)
+    z_keys = _resolve_batch_z_keys(file)
+    if not z_keys:
+        logger.warning("Batch main plot payload skipped: no z-parameter columns found in '%s'.", selected_file)
+        return no_update
 
-
-    # List for holding 'shapes'
-    shapes = []
-
-    if use_gradient_map and gradient_result:
-        xi, yi, gradient_grid = gradient_result
-        gradient_trace = dict(
-            x=xi,
-            y=yi,
-            z=gradient_grid,
-            colorscale=settings["colormap_value"],
-            colorbar=colorbar_title,
-            hovertemplate=f"x: %{{x}}<br>y: %{{y}}<br>{colorbar_label}: %{{z}}<extra></extra>",
-            showscale=True,
-            connectgaps=False,
-        )
-        if manual_scale:
-            gradient_trace.update(zmin=zmin, zmax=zmax, zauto=False)
-
-        figure.add_trace(go.Heatmap(**gradient_trace))
-    else:
-        is_ellipse = settings["marker_type"] == "ellipse"
-
-        marker = dict(
-            size=settings["marker_size"],
-            opacity=0 if is_ellipse else 1,
-            color=z_data,
-            colorscale=settings["colormap_value"],  # set the colormap
-            colorbar=colorbar_title,  # show selected Z-data name above color scale
-            showscale=True  # show the color scale
-        )
-        if manual_scale:
-            marker.update(cmin=zmin, cmax=zmax, cauto=False)
-
-        primary_trace = dict(
-            x=x_data,
-            y=y_data,
-            mode='markers',
-            marker=marker,
-            hovertemplate="x: %{x}<br>y: %{y}<br>z: %{marker.color}<extra></extra>",
-            showlegend=False,
-        )
-
-        figure.add_trace(go.Scatter(**primary_trace))
-
-
-        if is_ellipse:
-            # Making colors
-            d_min, d_max = zmin, zmax
-
-            if d_max > d_min:
-                norm_zdata = (z_data - d_min) / (d_max - d_min)
-                norm_zdata = np.clip(norm_zdata, 0, 1)
-            else:
-                norm_zdata = np.zeros_like(z_data, dtype=float)
-            colors = px.colors.sample_colorscale(colorscale=settings["colormap_value"], samplepoints=norm_zdata)
-            
-            shapes.extend([gen_spot(x, y, c, settings["spot_size"], settings["angle_of_incident"]) for x, y, c in zip(x_data, y_data, colors)])
-    
-
-    # Adds outline if outline is selected
-    if settings["sample_outline"]:
-        # add sample outline to 'shapes'
-        
-        shapes.append(generate_outline(settings))
-    
-
-    # Add stage outline
-    if settings["stage_state"]:
-        CWD = os.getcwd()
-        DXF_FILE = os.path.join(CWD, "src/assets/jaw_stage_outline.dxf")
-        
-        #dxf_filepath = r"src\assets\JAW stage outline.dxf"
-        
-        stage_outline = dxf_to_path(DXF_FILE)
-        shapes.extend(stage_outline)
-    
-    # Add edge exclusion outline if selected
-    if settings["sample_outline"] and settings["ee_state"]:
-
-        ee = []
-        if settings["ee_type"] == "radial":
-            ee.append(radial_edge_exclusion_outline(settings))
-        elif settings["ee_type"] == "uniform":
-            ee.append(uniform_edge_exclusion_outline(settings))
-
-        shapes.extend(ee)
-    
-
-    # Calculate 'zoom-window'
-    xmin, xmax = min(x_data), max(x_data)
-    ymin, ymax = min(y_data), max(y_data)
-    scale_factor = 0.2
-    scale_range = xmax - xmin
-
-    #Adding shapes to the figure
-    figure.update_layout(
-        shapes=shapes,
-        xaxis=dict(range=[xmin - scale_factor*scale_range, xmax + scale_factor*scale_range]),
-        yaxis=dict(range=[ymin - scale_factor*scale_range, ymax + scale_factor*scale_range]),
+    logger.info(
+        "Batch main plot payload: loaded %d points, %d z-parameters in %.3fs.",
+        point_count,
+        len(z_keys),
+        load_dt,
     )
 
+    stage_outline = None
+    if settings.get("stage_state"):
+        cwd = os.getcwd()
+        dxf_file = os.path.join(cwd, "src/assets/jaw_stage_outline.dxf")
+        stage_outline = dxf_to_path(dxf_file)
 
-    return figure, sorted(file.get_column_names())
+    root_name = _safe_filename_fragment(os.path.splitext(selected_file)[0])
+    payload = []
+    build_total = 0.0
+    for idx, z_key in enumerate(z_keys, start=1):
+        build_t0 = time.perf_counter()
+        per_plot_settings = {**settings, "z_data_value": z_key}
+        figure, _ = _build_main_figure(
+            file,
+            per_plot_settings,
+            z_label=z_key,
+            force_two_sigma=True,
+            stage_outline=stage_outline,
+        )
+        build_dt = time.perf_counter() - build_t0
+        build_total += build_dt
+
+        plot_name = _safe_filename_fragment(z_key)
+        payload.append(
+            {
+                "filename": f"{root_name}_{plot_name}.png",
+                "figure": json.loads(figure.to_json()),
+            }
+        )
+
+        logger.info(
+            "Batch main plot payload [%d/%d] z='%s': figure prepared in %.3fs.",
+            idx,
+            len(z_keys),
+            z_key,
+            build_dt,
+        )
+
+    callback_dt = time.perf_counter() - callback_t0
+    logger.info(
+        "Batch main plot payload completed: plots=%d, build_total=%.3fs, callback_total=%.3fs",
+        len(z_keys),
+        build_total,
+        callback_dt,
+    )
+    return {
+        "request_id": int(time.time() * 1000),
+        "plots": payload,
+        "width": EXPORT_IMAGE_WIDTH,
+        "height": EXPORT_IMAGE_HEIGHT,
+        "scale": EXPORT_IMAGE_SCALE,
+    }
+
+
+clientside_callback(
+    """
+    async function(payload) {
+        const noUpdate = window.dash_clientside.no_update;
+        if (!payload || !payload.plots || payload.plots.length === 0) {
+            return noUpdate;
+        }
+
+        if (typeof Plotly === "undefined" || typeof Plotly.downloadImage !== "function") {
+            return "Batch export failed: Plotly image download API is unavailable in the browser.";
+        }
+
+        const width = payload.width || 1400;
+        const height = payload.height || 1000;
+        const scale = payload.scale || 1;
+        const plots = payload.plots;
+
+        const tempDiv = document.createElement("div");
+        tempDiv.style.position = "fixed";
+        tempDiv.style.left = "-10000px";
+        tempDiv.style.top = "-10000px";
+        tempDiv.style.width = `${width}px`;
+        tempDiv.style.height = `${height}px`;
+        document.body.appendChild(tempDiv);
+
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+        try {
+            let plotted = false;
+            for (let idx = 0; idx < plots.length; idx++) {
+                const plot = plots[idx];
+                const figure = plot.figure || {};
+                const data = figure.data || [];
+                const layout = figure.layout || {};
+                const filename = (plot.filename || `batch_plot_${idx + 1}.png`).replace(/\\.png$/i, "");
+                console.info(`[Batch main plots] exporting ${idx + 1}/${plots.length}: ${filename}.png`);
+
+                if (!plotted) {
+                    await Plotly.newPlot(tempDiv, data, layout, {displayModeBar: false, responsive: false, staticPlot: true});
+                    plotted = true;
+                } else {
+                    await Plotly.react(tempDiv, data, layout, {displayModeBar: false, responsive: false, staticPlot: true});
+                }
+
+                await Plotly.downloadImage(tempDiv, {
+                    format: "png",
+                    filename: filename,
+                    width: width,
+                    height: height,
+                    scale: scale
+                });
+                console.info(`[Batch main plots] downloaded ${idx + 1}/${plots.length}: ${filename}.png`);
+
+                // Prevent browser download throttling when triggering many files quickly.
+                await sleep(120);
+            }
+
+            return `Batch main plots downloaded (${plots.length} PNG files).`;
+        } catch (error) {
+            const message = (error && error.message) ? error.message : String(error);
+            console.error("Batch main plot browser export failed:", error);
+            return `Batch main plots failed: ${message}`;
+        } finally {
+            try {
+                Plotly.purge(tempDiv);
+            } catch (e) {}
+            tempDiv.remove();
+        }
+    }
+    """,
+    Output(ids.Div.INFO, "children", allow_duplicate=True),
+    Input(ids.Store.BATCH_MAIN_PLOTS_PAYLOAD, "data"),
+    prevent_initial_call=True,
+)

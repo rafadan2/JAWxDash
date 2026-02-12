@@ -29,6 +29,7 @@ app.layout = dbc.Container([
     dcc.Store(id=ids.Store.UPLOADED_FILES, data={}, storage_type="session"),
     dcc.Store(id=ids.Store.DEFAULT_SETTINGS, data=DEFAULT_SETTINGS),
     dcc.Store(id=ids.Store.SETTINGS, data={}),
+    dcc.Store(id=ids.Store.BATCH_MAIN_PLOTS_PAYLOAD, data={}),
 
     dbc.Row([
         # Left column

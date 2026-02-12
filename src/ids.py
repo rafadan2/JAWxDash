@@ -4,6 +4,7 @@ class Button:
     DOWNLOAD_MASKED_DATA = "btn_apply_edge_exclusion"
     Z_SCALE_2SIGMA = "btn_z_scale_2sigma"
     Z_SCALE_AUTO = "btn_z_scale_auto"
+    BATCH_MAIN_PLOTS = "btn_batch_main_plots"
 
 
 class Div:
@@ -74,6 +75,7 @@ class Store:
     UPLOADED_FILES = "store_uploaded_files"
     DEFAULT_SETTINGS = "store_default_settings"
     SETTINGS = "store_settings"
+    BATCH_MAIN_PLOTS_PAYLOAD = "store_batch_main_plots_payload"
 
 
 class Tabs:
