@@ -53,10 +53,52 @@ spot_layout = dbc.Card([
             )
         ]),
 
-        # Gradient grid mode
+        # Render mode
         dbc.Row([
             dbc.Col(
-                html.Label("Grid mode", className="mb-0 d-block text-body text-decoration-none"),
+                html.Label("Render", className="mb-0 d-block text-body text-decoration-none"),
+                width=5,
+            ),
+            dbc.Col(
+                dcc.RadioItems(
+                    id=ids.RadioItems.RENDER_MODE,
+                    options=[
+                        {"label": "Markers", "value": "markers"},
+                        {"label": "Heatmap", "value": "heatmap"},
+                    ],
+                    inline=True,
+                    labelStyle={"margin-right": "15px"},
+                    className="mb-0",
+                ),
+                width=7,
+            )
+        ]),
+
+        # Gradient coordinate system
+        dbc.Row([
+            dbc.Col(
+                html.Label("Gradient frame", className="mb-0 d-block text-body text-decoration-none"),
+                width=5,
+            ),
+            dbc.Col(
+                dcc.RadioItems(
+                    id=ids.RadioItems.GRADIENT_COORDINATE_MODE,
+                    options=[
+                        {"label": "Cartesian", "value": "cartesian"},
+                        {"label": "Polar", "value": "polar"},
+                    ],
+                    inline=True,
+                    labelStyle={"margin-right": "15px"},
+                    className="mb-0",
+                ),
+                width=7,
+            )
+        ]),
+
+        # Heatmap grid mode
+        dbc.Row([
+            dbc.Col(
+                html.Label("Heatmap grid", className="mb-0 d-block text-body text-decoration-none"),
                 width=5,
             ),
             dbc.Col(

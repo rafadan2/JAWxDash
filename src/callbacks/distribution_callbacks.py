@@ -5,7 +5,12 @@ from plotly.subplots import make_subplots
 
 
 from src import ids
-from src.callbacks.graph_callbacks import _build_gradient_map, _gradient_label, _resolve_z_key
+from src.callbacks.graph_callbacks import (
+    _build_gradient_map,
+    _gradient_label,
+    _resolve_gradient_calc_grid_mode,
+    _resolve_z_key,
+)
 from src.ellipsometry_toolbox.ellipsometry import Ellipsometry
 from src.ellipsometry_toolbox.linear_translations import rotate, translate
 from src.ellipsometry_toolbox.masking import create_masked_file
@@ -140,9 +145,10 @@ def _prepare_active_series(file, settings):
         y_data,
         z_data,
         gradient_mode,
-        grid_mode=active_settings.get("gradient_grid_mode", "auto"),
+        grid_mode=_resolve_gradient_calc_grid_mode(active_settings),
         grid_size=active_settings.get("gradient_grid_size"),
         k_nearest=active_settings.get("gradient_k_nearest"),
+        polar_center=(active_settings.get("mappattern_x"), active_settings.get("mappattern_y")),
     )
     if not gradient_result:
         finite_mask = np.isfinite(x_data) & np.isfinite(y_data) & np.isfinite(z_data)
@@ -547,9 +553,10 @@ def update_gradient_violin_tab(active_tab, selected_file, settings, stored_files
             y_data,
             z_data,
             "magnitude",
-            grid_mode=active_settings.get("gradient_grid_mode", "auto"),
+            grid_mode=_resolve_gradient_calc_grid_mode(active_settings),
             grid_size=active_settings.get("gradient_grid_size"),
             k_nearest=active_settings.get("gradient_k_nearest"),
+            polar_center=(active_settings.get("mappattern_x"), active_settings.get("mappattern_y")),
         )
         if not gradient_result:
             continue
@@ -678,9 +685,10 @@ def update_spatial_binning_tab(
             y_data,
             z_data,
             gradient_mode,
-            grid_mode=active_settings.get("gradient_grid_mode", "auto"),
+            grid_mode=_resolve_gradient_calc_grid_mode(active_settings),
             grid_size=active_settings.get("gradient_grid_size"),
             k_nearest=active_settings.get("gradient_k_nearest"),
+            polar_center=(active_settings.get("mappattern_x"), active_settings.get("mappattern_y")),
         )
         if gradient_result:
             xi, yi, gradient_grid = gradient_result

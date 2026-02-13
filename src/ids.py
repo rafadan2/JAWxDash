@@ -56,7 +56,9 @@ class Input:
 class RadioItems:
     PLOT_STYLE = "radioitems_plot_style"
     SPOT_SIZE = "radioitems_spot_size"
+    RENDER_MODE = "radioitems_render_mode"
     GRADIENT_GRID_MODE = "radioitems_gradient_grid_mode"
+    GRADIENT_COORDINATE_MODE = "radioitems_gradient_coordinate_mode"
     EDGE_EXCLUSION_STATE = "radioitems_edge_exclusion_state"
     EDGE_EXCLUSION_TYPE = "radioitems_edge_exclusion_type"
     BATCH_PROCESSING = "radioitems_batch_processing"
