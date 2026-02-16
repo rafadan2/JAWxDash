@@ -107,7 +107,7 @@ analysis_tabs_layout = dbc.Tabs(
                                             id=ids.RadioItems.SPATIAL_BIN_ACCEPTED_VARIATION_MODE,
                                             options=[
                                                 {"label": "Percent", "value": "percent"},
-                                                {"label": "σ", "value": "sigma"},
+                                                {"label": "\u03c3", "value": "sigma"},
                                             ],
                                             value="percent",
                                             inline=True,

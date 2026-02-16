@@ -622,7 +622,7 @@ def update_gradient_violin_tab(active_tab, selected_file, settings, stored_files
     Input(ids.RadioItems.SPATIAL_BIN_ACCEPTED_VARIATION_MODE, "value"),
 )
 def update_spatial_bin_variation_unit(variation_mode):
-    return "σ" if variation_mode == "sigma" else "%"
+    return "\u03c3" if variation_mode == "sigma" else "%"
 
 
 @callback(
@@ -1101,64 +1101,170 @@ def update_spatial_binning_tab(
         range=[plot_y_min, plot_y_max],
     )
 
-    radial_lines = []
+    reference_scope = "non-EE points" if active_settings.get("ee_state") else "all points"
+    if variation_mode == "sigma":
+        variation_window = f"+/-{accepted_variation_value:.3g}\u03c3"
+        variation_detail = f"Reference \u03c3: {reference_std:.6g} {value_label}"
+    else:
+        variation_window = f"+/-{accepted_variation_value:.3g}%"
+        variation_detail = "Reference \u03c3 available when mode is \u03c3"
+
+    def _summary_card(label, value):
+        return html.Div(
+            [
+                html.Div(label, className="text-uppercase text-muted small"),
+                html.Div(value, className="fw-semibold"),
+            ],
+            className="col-12 col-sm-6 col-xl-3 border rounded p-2 bg-light",
+        )
+
+    radial_rows = []
     for radial_idx in range(n_radial):
         r_min = radial_edges[radial_idx]
         r_max = radial_edges[radial_idx + 1]
-        radial_lines.append(
-            html.Div(
-                f"Radial bin {radial_idx + 1}: r = [{r_min:.4g}, {r_max:.4g}] mm"
+        radial_rows.append(
+            html.Tr(
+                [
+                    html.Td(f"R{radial_idx + 1}"),
+                    html.Td(f"{r_min:.4g}"),
+                    html.Td(f"{r_max:.4g}"),
+                ]
             )
         )
 
-    count_lines = []
+    bin_rows = []
     for b in range(interior_bin_count):
         radial_id = b // n_angular + 1
         angular_id = b % n_angular + 1
         bin_total = int(interior_counts[b])
         bin_conformal = int(interior_conformal_counts[b])
         bin_conformal_pct = 100.0 * bin_conformal / bin_total if bin_total > 0 else 0.0
-        count_lines.append(
-            html.Div(
-                f"Bin {b + 1} (R{radial_id}, A{angular_id}): {bin_total} points; conformal {bin_conformal_pct:.1f}% ({bin_conformal}/{bin_total})"
+        pct_class = (
+            "text-success fw-semibold"
+            if bin_conformal_pct >= 95.0
+            else "text-warning fw-semibold"
+            if bin_conformal_pct >= 80.0
+            else "text-danger fw-semibold"
+        )
+        bin_rows.append(
+            html.Tr(
+                [
+                    html.Td(str(b + 1)),
+                    html.Td(f"R{radial_id} / A{angular_id}"),
+                    html.Td(f"{bin_total}"),
+                    html.Td(f"{bin_conformal}/{bin_total}" if bin_total > 0 else "0/0"),
+                    html.Td(f"{bin_conformal_pct:.1f}%", className=pct_class),
+                ]
             )
         )
     if active_settings.get("ee_state"):
         edge_conformal_pct = 100.0 * edge_conformal_count / edge_count if edge_count > 0 else 0.0
-        count_lines.append(
-            html.Div(
-                f"Edge excluded (EE): {edge_count} points; conformal {edge_conformal_pct:.1f}% ({edge_conformal_count}/{edge_count})"
+        edge_pct_class = (
+            "text-success fw-semibold"
+            if edge_conformal_pct >= 95.0
+            else "text-warning fw-semibold"
+            if edge_conformal_pct >= 80.0
+            else "text-danger fw-semibold"
+        )
+        bin_rows.append(
+            html.Tr(
+                [
+                    html.Td("EE"),
+                    html.Td("Edge excluded"),
+                    html.Td(f"{edge_count}"),
+                    html.Td(f"{edge_conformal_count}/{edge_count}" if edge_count > 0 else "0/0"),
+                    html.Td(f"{edge_conformal_pct:.1f}%", className=edge_pct_class),
+                ],
+                className="table-secondary",
             )
-        )
-
-    reference_scope = "non-EE points" if active_settings.get("ee_state") else "all points"
-    if variation_mode == "sigma":
-        accepted_variation_line = (
-            f"Accepted variation: +/-{accepted_variation_value:.3g}σ around median of {reference_scope} "
-            f"(σ = {reference_std:.6g} {value_label})"
-        )
-    else:
-        accepted_variation_line = (
-            f"Accepted variation: +/-{accepted_variation_value:.3g}% around median of {reference_scope}"
         )
 
     count_panel = html.Div(
         [
-            html.Div(html.Strong("Spatial bin summary")),
-            html.Div(f"Scheme: {n_radial} radial bins x {n_angular} angular bins = {interior_bin_count} interior sections"),
-            html.Div(f"Center used: ({x0_mm:.3f} mm, {y0_mm:.3f} mm)"),
-            html.Div(f"Total points analyzed: {values.size}"),
-            html.Div(accepted_variation_line),
+            html.Div("Spatial bin summary", className="fw-semibold fs-5"),
             html.Div(
-                f"Reference median: {reference_median:.6g} {value_label}; conformal range: [{lower_limit:.6g}, {upper_limit:.6g}]"
+                f"Center: ({x0_mm:.3f} mm, {y0_mm:.3f} mm) | Reference set: {reference_scope}",
+                className="text-muted small mb-3",
             ),
             html.Div(
-                f"Conformal points in reference set: {reference_conformal_pct:.1f}% ({reference_conformal_total}/{reference_total})"
+                [
+                    _summary_card(
+                        "Scheme",
+                        f"{n_radial} radial x {n_angular} angular ({interior_bin_count} interior sections)",
+                    ),
+                    _summary_card("Points analyzed", f"{int(values.size):,}"),
+                    _summary_card(
+                        "Conformal (reference set)",
+                        f"{reference_conformal_pct:.1f}% ({reference_conformal_total}/{reference_total})",
+                    ),
+                    _summary_card("Accepted window", variation_window),
+                    _summary_card("Reference median", f"{reference_median:.6g} {value_label}"),
+                    _summary_card("Conformal range", f"[{lower_limit:.6g}, {upper_limit:.6g}]"),
+                    _summary_card("Reference spread", variation_detail),
+                ],
+                className="row g-2 mb-3",
             ),
-            html.Div("Radial boundaries are quantile-based on non-edge points for near-equal occupancy."),
-            *radial_lines,
-            *count_lines,
-        ]
+            html.Div(
+                [
+                    html.Div(
+                        [
+                            html.Div("Radial boundaries (mm)", className="fw-semibold mb-2"),
+                            html.Div(
+                                "Quantile-based on non-edge points for near-equal occupancy.",
+                                className="text-muted small mb-2",
+                            ),
+                            html.Div(
+                                html.Table(
+                                    [
+                                        html.Thead(
+                                            html.Tr(
+                                                [
+                                                    html.Th("Bin"),
+                                                    html.Th("r min"),
+                                                    html.Th("r max"),
+                                                ]
+                                            )
+                                        ),
+                                        html.Tbody(radial_rows),
+                                    ],
+                                    className="table table-sm table-striped table-bordered align-middle mb-0",
+                                ),
+                                className="table-responsive",
+                            ),
+                        ],
+                        className="col-12 col-lg-4",
+                    ),
+                    html.Div(
+                        [
+                            html.Div("Conformance by section", className="fw-semibold mb-2"),
+                            html.Div(
+                                html.Table(
+                                    [
+                                        html.Thead(
+                                            html.Tr(
+                                                [
+                                                    html.Th("Section"),
+                                                    html.Th("Region"),
+                                                    html.Th("Points"),
+                                                    html.Th("Conformal"),
+                                                    html.Th("Conformal %"),
+                                                ]
+                                            )
+                                        ),
+                                        html.Tbody(bin_rows),
+                                    ],
+                                    className="table table-sm table-striped table-bordered align-middle mb-0",
+                                ),
+                                className="table-responsive",
+                            ),
+                        ],
+                        className="col-12 col-lg-8",
+                    ),
+                ],
+                className="row g-3",
+            ),
+        ],
+        className="border rounded bg-white p-3",
     )
-
     return map_fig, trend_fig, count_panel
+
