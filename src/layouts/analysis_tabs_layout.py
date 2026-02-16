@@ -83,7 +83,7 @@ analysis_tabs_layout = dbc.Tabs(
                                             className="form-control",
                                         ),
                                     ],
-                                    width=6,
+                                    width=3,
                                 ),
                                 dbc.Col(
                                     [
@@ -98,7 +98,49 @@ analysis_tabs_layout = dbc.Tabs(
                                             className="form-control",
                                         ),
                                     ],
-                                    width=6,
+                                    width=3,
+                                ),
+                                dbc.Col(
+                                    [
+                                        html.Label("Accepted variation mode", className="mb-1"),
+                                        dcc.RadioItems(
+                                            id=ids.RadioItems.SPATIAL_BIN_ACCEPTED_VARIATION_MODE,
+                                            options=[
+                                                {"label": "Percent", "value": "percent"},
+                                                {"label": "σ", "value": "sigma"},
+                                            ],
+                                            value="percent",
+                                            inline=True,
+                                            labelStyle={"margin-right": "15px"},
+                                            className="mb-0",
+                                        ),
+                                    ],
+                                    width=3,
+                                ),
+                                dbc.Col(
+                                    [
+                                        html.Label("Accepted variation", className="mb-1"),
+                                        html.Div(
+                                            [
+                                                dcc.Input(
+                                                    id=ids.Input.SPATIAL_BIN_ACCEPTED_VARIATION,
+                                                    type="number",
+                                                    value=5.0,
+                                                    min=0,
+                                                    step=0.1,
+                                                    debounce=True,
+                                                    className="form-control",
+                                                ),
+                                                html.Span(
+                                                    "%",
+                                                    id=ids.Div.SPATIAL_BIN_ACCEPTED_VARIATION_UNIT,
+                                                    className="input-group-text",
+                                                ),
+                                            ],
+                                            className="input-group",
+                                        ),
+                                    ],
+                                    width=3,
                                 ),
                             ],
                             className="g-2 align-items-end",

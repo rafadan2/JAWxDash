@@ -618,6 +618,14 @@ def update_gradient_violin_tab(active_tab, selected_file, settings, stored_files
 
 
 @callback(
+    Output(ids.Div.SPATIAL_BIN_ACCEPTED_VARIATION_UNIT, "children"),
+    Input(ids.RadioItems.SPATIAL_BIN_ACCEPTED_VARIATION_MODE, "value"),
+)
+def update_spatial_bin_variation_unit(variation_mode):
+    return "σ" if variation_mode == "sigma" else "%"
+
+
+@callback(
     Output(ids.Graph.SPATIAL_BIN_MAP, "figure"),
     Output(ids.Graph.SPATIAL_BIN_TRENDS, "figure"),
     Output(ids.Div.SPATIAL_BIN_COUNTS, "children"),
@@ -626,6 +634,8 @@ def update_gradient_violin_tab(active_tab, selected_file, settings, stored_files
     Input(ids.Store.SETTINGS, "data"),
     Input(ids.Input.SPATIAL_BIN_RADIAL_COUNT, "value"),
     Input(ids.Input.SPATIAL_BIN_ANGULAR_COUNT, "value"),
+    Input(ids.Input.SPATIAL_BIN_ACCEPTED_VARIATION, "value"),
+    Input(ids.RadioItems.SPATIAL_BIN_ACCEPTED_VARIATION_MODE, "value"),
     State(ids.Store.UPLOADED_FILES, "data"),
 )
 def update_spatial_binning_tab(
@@ -634,6 +644,8 @@ def update_spatial_binning_tab(
     settings,
     radial_bin_count,
     angular_bin_count,
+    accepted_variation_value,
+    accepted_variation_mode,
     stored_files,
 ):
     if active_tab != "spatial_binning":
@@ -741,6 +753,32 @@ def update_spatial_binning_tab(
         n_angular = 4
     n_angular = int(np.clip(n_angular, 1, 72))
 
+    variation_mode = accepted_variation_mode if accepted_variation_mode in {"percent", "sigma"} else "percent"
+    default_variation = 2.0 if variation_mode == "sigma" else 5.0
+    try:
+        accepted_variation_value = float(accepted_variation_value)
+    except (TypeError, ValueError):
+        accepted_variation_value = default_variation
+    accepted_variation_value = float(np.clip(accepted_variation_value, 0.0, 1000.0))
+
+    reference_mask = include_mask if active_settings.get("ee_state") else np.ones(values.size, dtype=bool)
+    if not np.any(reference_mask):
+        reference_mask = np.ones(values.size, dtype=bool)
+
+    reference_values = values[reference_mask]
+    reference_median = float(np.median(reference_values)) if reference_values.size else float(np.median(values))
+    reference_std = float(np.std(reference_values, ddof=1)) if reference_values.size > 1 else 0.0
+    if variation_mode == "sigma":
+        tolerance_abs = accepted_variation_value * reference_std
+    else:
+        tolerance_abs = abs(reference_median) * accepted_variation_value / 100.0
+    lower_limit = reference_median - tolerance_abs
+    upper_limit = reference_median + tolerance_abs
+    if np.isclose(tolerance_abs, 0.0):
+        conformal_mask = np.isclose(values, reference_median, atol=np.finfo(float).eps, rtol=0.0)
+    else:
+        conformal_mask = np.abs(values - reference_median) <= tolerance_abs
+
     interior_bin_count = n_radial * n_angular
     edge_bin_index = interior_bin_count
     bin_index = np.full(values.size, -1, dtype=int)
@@ -771,6 +809,14 @@ def update_spatial_binning_tab(
 
     interior_counts = np.asarray([np.sum(bin_index == i) for i in range(interior_bin_count)], dtype=int)
     edge_count = int(np.sum(bin_index == edge_bin_index)) if active_settings.get("ee_state") else 0
+    interior_conformal_counts = np.asarray(
+        [np.sum(conformal_mask & (bin_index == i)) for i in range(interior_bin_count)],
+        dtype=int,
+    )
+    edge_conformal_count = int(np.sum(conformal_mask & (bin_index == edge_bin_index))) if active_settings.get("ee_state") else 0
+    reference_conformal_total = int(np.sum(conformal_mask[reference_mask]))
+    reference_total = int(np.sum(reference_mask))
+    reference_conformal_pct = 100.0 * reference_conformal_total / reference_total if reference_total > 0 else 0.0
 
     map_fig = go.Figure()
     label_x = []
@@ -975,6 +1021,55 @@ def update_spatial_binning_tab(
                 hovertemplate="Section EE<br>Mean: %{y:.6g}<extra></extra>",
             )
         )
+
+    finite_values = values[np.isfinite(values)]
+    if finite_values.size > 0:
+        raw_y_min = float(np.min(finite_values))
+        raw_y_max = float(np.max(finite_values))
+    else:
+        raw_y_min = lower_limit
+        raw_y_max = upper_limit
+    span = raw_y_max - raw_y_min
+    y_padding = 0.08 * span if span > 0 else max(abs(reference_median) * 0.1, 1.0)
+    plot_y_min = min(raw_y_min, lower_limit) - y_padding
+    plot_y_max = max(raw_y_max, upper_limit) + y_padding
+
+    if lower_limit > plot_y_min:
+        trend_fig.add_hrect(
+            y0=plot_y_min,
+            y1=lower_limit,
+            fillcolor="rgba(220, 30, 30, 0.12)",
+            line_width=0,
+            layer="below",
+        )
+    if upper_limit < plot_y_max:
+        trend_fig.add_hrect(
+            y0=upper_limit,
+            y1=plot_y_max,
+            fillcolor="rgba(220, 30, 30, 0.12)",
+            line_width=0,
+            layer="below",
+        )
+
+    trend_fig.add_hline(
+        y=reference_median,
+        line=dict(color="rgba(25,25,25,0.75)", width=1.5, dash="dash"),
+    )
+    if np.isclose(lower_limit, upper_limit):
+        trend_fig.add_hline(
+            y=upper_limit,
+            line=dict(color="rgba(175,20,20,0.7)", width=1.2, dash="dot"),
+        )
+    else:
+        trend_fig.add_hline(
+            y=lower_limit,
+            line=dict(color="rgba(175,20,20,0.7)", width=1.2, dash="dot"),
+        )
+        trend_fig.add_hline(
+            y=upper_limit,
+            line=dict(color="rgba(175,20,20,0.7)", width=1.2, dash="dot"),
+        )
+
     trend_fig.update_layout(
         template="plotly_white",
         title=dict(text="Data and trend by spatial section", x=0.5, xanchor="center", pad=dict(t=10, b=6)),
@@ -999,7 +1094,12 @@ def update_spatial_binning_tab(
         ticktext=tick_text,
         range=[0.5, tick_vals[-1] + 0.5],
     )
-    trend_fig.update_yaxes(title_text=value_label, automargin=True, title_standoff=8)
+    trend_fig.update_yaxes(
+        title_text=value_label,
+        automargin=True,
+        title_standoff=8,
+        range=[plot_y_min, plot_y_max],
+    )
 
     radial_lines = []
     for radial_idx in range(n_radial):
@@ -1015,13 +1115,32 @@ def update_spatial_binning_tab(
     for b in range(interior_bin_count):
         radial_id = b // n_angular + 1
         angular_id = b % n_angular + 1
+        bin_total = int(interior_counts[b])
+        bin_conformal = int(interior_conformal_counts[b])
+        bin_conformal_pct = 100.0 * bin_conformal / bin_total if bin_total > 0 else 0.0
         count_lines.append(
             html.Div(
-                f"Bin {b + 1} (R{radial_id}, A{angular_id}): {int(interior_counts[b])} points"
+                f"Bin {b + 1} (R{radial_id}, A{angular_id}): {bin_total} points; conformal {bin_conformal_pct:.1f}% ({bin_conformal}/{bin_total})"
             )
         )
     if active_settings.get("ee_state"):
-        count_lines.append(html.Div(f"Edge excluded (EE): {edge_count} points"))
+        edge_conformal_pct = 100.0 * edge_conformal_count / edge_count if edge_count > 0 else 0.0
+        count_lines.append(
+            html.Div(
+                f"Edge excluded (EE): {edge_count} points; conformal {edge_conformal_pct:.1f}% ({edge_conformal_count}/{edge_count})"
+            )
+        )
+
+    reference_scope = "non-EE points" if active_settings.get("ee_state") else "all points"
+    if variation_mode == "sigma":
+        accepted_variation_line = (
+            f"Accepted variation: +/-{accepted_variation_value:.3g}σ around median of {reference_scope} "
+            f"(σ = {reference_std:.6g} {value_label})"
+        )
+    else:
+        accepted_variation_line = (
+            f"Accepted variation: +/-{accepted_variation_value:.3g}% around median of {reference_scope}"
+        )
 
     count_panel = html.Div(
         [
@@ -1029,6 +1148,13 @@ def update_spatial_binning_tab(
             html.Div(f"Scheme: {n_radial} radial bins x {n_angular} angular bins = {interior_bin_count} interior sections"),
             html.Div(f"Center used: ({x0_mm:.3f} mm, {y0_mm:.3f} mm)"),
             html.Div(f"Total points analyzed: {values.size}"),
+            html.Div(accepted_variation_line),
+            html.Div(
+                f"Reference median: {reference_median:.6g} {value_label}; conformal range: [{lower_limit:.6g}, {upper_limit:.6g}]"
+            ),
+            html.Div(
+                f"Conformal points in reference set: {reference_conformal_pct:.1f}% ({reference_conformal_total}/{reference_total})"
+            ),
             html.Div("Radial boundaries are quantile-based on non-edge points for near-equal occupancy."),
             *radial_lines,
             *count_lines,

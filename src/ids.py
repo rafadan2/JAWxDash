@@ -12,6 +12,7 @@ class Div:
     STAT_TABLE = "div_stat_table"
     DISTRIBUTION_METRICS = "div_distribution_metrics"
     SPATIAL_BIN_COUNTS = "div_spatial_bin_counts"
+    SPATIAL_BIN_ACCEPTED_VARIATION_UNIT = "div_spatial_bin_accepted_variation_unit"
 
 
 class Download:
@@ -51,6 +52,7 @@ class Input:
     SAMPLE_HEIGHT = "input_sample_height"
     SPATIAL_BIN_RADIAL_COUNT = "input_spatial_bin_radial_count"
     SPATIAL_BIN_ANGULAR_COUNT = "input_spatial_bin_angular_count"
+    SPATIAL_BIN_ACCEPTED_VARIATION = "input_spatial_bin_accepted_variation"
 
 
 class RadioItems:
@@ -59,6 +61,7 @@ class RadioItems:
     RENDER_MODE = "radioitems_render_mode"
     GRADIENT_GRID_MODE = "radioitems_gradient_grid_mode"
     GRADIENT_COORDINATE_MODE = "radioitems_gradient_coordinate_mode"
+    SPATIAL_BIN_ACCEPTED_VARIATION_MODE = "radioitems_spatial_bin_accepted_variation_mode"
     EDGE_EXCLUSION_STATE = "radioitems_edge_exclusion_state"
     EDGE_EXCLUSION_TYPE = "radioitems_edge_exclusion_type"
     BATCH_PROCESSING = "radioitems_batch_processing"
