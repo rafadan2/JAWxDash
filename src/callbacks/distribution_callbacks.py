@@ -10,10 +10,16 @@ from src.callbacks.graph_callbacks import (
     _gradient_label,
     _resolve_gradient_calc_grid_mode,
     _resolve_z_key,
+    _resolve_z_limits,
 )
 from src.ellipsometry_toolbox.ellipsometry import Ellipsometry
 from src.ellipsometry_toolbox.linear_translations import rotate, translate
-from src.ellipsometry_toolbox.masking import create_masked_file
+from src.ellipsometry_toolbox.masking import (
+    create_masked_file,
+    radial_edge_exclusion_outline,
+    uniform_edge_exclusion_outline,
+)
+from src.utils.sample_outlines import generate_outline
 from src.templates.settings_template import DEFAULT_SETTINGS
 
 
@@ -626,6 +632,14 @@ def update_spatial_bin_variation_unit(variation_mode):
 
 
 @callback(
+    Output(ids.Input.SPATIAL_BIN_ACCEPTED_VARIATION, "value"),
+    Input(ids.RadioItems.SPATIAL_BIN_ACCEPTED_VARIATION_MODE, "value"),
+)
+def update_spatial_bin_variation_default(variation_mode):
+    return 2.0 if variation_mode == "sigma" else 5.0
+
+
+@callback(
     Output(ids.Graph.SPATIAL_BIN_MAP, "figure"),
     Output(ids.Graph.SPATIAL_BIN_TRENDS, "figure"),
     Output(ids.Div.SPATIAL_BIN_COUNTS, "children"),
@@ -744,7 +758,7 @@ def update_spatial_binning_tab(
     try:
         n_radial = int(radial_bin_count)
     except (TypeError, ValueError):
-        n_radial = 2
+        n_radial = 1
     n_radial = int(np.clip(n_radial, 1, 40))
 
     try:
@@ -822,49 +836,87 @@ def update_spatial_binning_tab(
     label_x = []
     label_y = []
     label_text = []
+    map_active_values = values[np.isfinite(values)]
+    map_zmin, map_zmax, map_manual_scale = _resolve_z_limits(
+        map_active_values,
+        active_settings.get("z_scale_min"),
+        active_settings.get("z_scale_max"),
+        force_two_sigma=False,
+    )
+    map_colorbar = dict(title=dict(text=value_label, side="top"))
+    map_coloraxis = dict(
+        colorscale=active_settings["colormap_value"],
+        colorbar=map_colorbar,
+    )
+    if map_manual_scale:
+        map_coloraxis.update(cmin=map_zmin, cmax=map_zmax, cauto=False)
+
+    interior_mask = bin_index < interior_bin_count
+    if np.any(interior_mask):
+        interior_bins = bin_index[interior_mask].astype(int)
+        interior_radial_ids = interior_bins // n_angular + 1
+        interior_angular_ids = interior_bins % n_angular + 1
+        interior_customdata = np.column_stack(
+            [
+                interior_bins + 1,
+                interior_radial_ids,
+                interior_angular_ids,
+                values[interior_mask],
+            ]
+        )
+        interior_marker = dict(
+            size=6,
+            opacity=0.7,
+            color=values[interior_mask],
+            coloraxis="coloraxis",
+        )
+        map_fig.add_trace(
+            go.Scatter(
+                x=x_mm[interior_mask],
+                y=y_mm[interior_mask],
+                mode="markers",
+                marker=interior_marker,
+                name="Data points",
+                showlegend=False,
+                hovertemplate=(
+                    "Section %{customdata[0]:.0f} (R%{customdata[1]:.0f}, A%{customdata[2]:.0f})"
+                    + "<br>x: %{x:.3f} mm<br>y: %{y:.3f} mm<br>"
+                    + f"{value_label}: %{{customdata[3]:.6g}}<extra></extra>"
+                ),
+                customdata=interior_customdata,
+            )
+        )
+
     for b in range(interior_bin_count):
         count = int(interior_counts[b])
         if count == 0:
             continue
         in_bin = bin_index == b
-        radial_id = b // n_angular + 1
-        angular_id = b % n_angular + 1
-        map_fig.add_trace(
-            go.Scatter(
-                x=x_mm[in_bin],
-                y=y_mm[in_bin],
-                mode="markers",
-                marker=dict(size=6, opacity=0.65),
-                name=f"Bin {b + 1} (n={count})",
-                hovertemplate=(
-                    f"Bin {b + 1} (R{radial_id}, A{angular_id})"
-                    + "<br>x: %{x:.3f} mm<br>y: %{y:.3f} mm<br>"
-                    + f"{value_label}: %{{customdata:.6g}}<extra></extra>"
-                ),
-                customdata=values[in_bin],
-            )
-        )
         label_x.append(float(np.mean(x_mm[in_bin])))
         label_y.append(float(np.mean(y_mm[in_bin])))
         label_text.append(str(b + 1))
 
     if active_settings.get("ee_state") and edge_count > 0:
         excluded_mask = bin_index == edge_bin_index
+        edge_marker = dict(
+            size=6,
+            opacity=0.65,
+            color=values[excluded_mask],
+            coloraxis="coloraxis",
+        )
         map_fig.add_trace(
             go.Scatter(
                 x=x_mm[excluded_mask],
                 y=y_mm[excluded_mask],
                 mode="markers",
-                marker=dict(size=6, opacity=0.6, color="rgba(150,150,150,0.8)"),
-                name=f"Edge excluded (n={edge_count})",
+                marker=edge_marker,
+                name="Edge excluded",
+                showlegend=False,
                 hovertemplate="Edge excluded<br>x: %{x:.3f} mm<br>y: %{y:.3f} mm<br>"
                 + f"{value_label}: %{{customdata:.6g}}<extra></extra>",
                 customdata=values[excluded_mask],
             )
         )
-        label_x.append(float(np.mean(x_mm[excluded_mask])))
-        label_y.append(float(np.mean(y_mm[excluded_mask])))
-        label_text.append("EE")
 
     max_radius = float(np.nanmax(radial_distance)) if radial_distance.size else 0.0
     for ring_radius in radial_edges[1:-1]:
@@ -895,6 +947,31 @@ def update_spatial_binning_tab(
             line=dict(color="rgba(30, 30, 30, 0.35)", width=1, dash="dot"),
         )
 
+    outline_settings_mm = {**active_settings}
+    for key in (
+        "sample_x",
+        "sample_y",
+        "sample_radius",
+        "sample_width",
+        "sample_height",
+        "ee_distance",
+    ):
+        outline_settings_mm[key] = _safe_float(active_settings.get(key), default=0.0) * 10.0
+
+    if active_settings.get("sample_outline"):
+        sample_outline_shape = generate_outline(outline_settings_mm)
+        if isinstance(sample_outline_shape, dict) and sample_outline_shape.get("type"):
+            map_fig.add_shape(sample_outline_shape)
+
+    if active_settings.get("sample_outline") and active_settings.get("ee_state"):
+        ee_shape = {}
+        if active_settings.get("ee_type") == "radial":
+            ee_shape = radial_edge_exclusion_outline(outline_settings_mm)
+        elif active_settings.get("ee_type") == "uniform":
+            ee_shape = uniform_edge_exclusion_outline(outline_settings_mm)
+        if isinstance(ee_shape, dict) and ee_shape.get("type"):
+            map_fig.add_shape(ee_shape)
+
     map_fig.add_trace(
         go.Scatter(
             x=[x0_mm],
@@ -902,6 +979,7 @@ def update_spatial_binning_tab(
             mode="markers",
             marker=dict(symbol="x", size=11, color="black"),
             name="Bin center",
+            showlegend=False,
             hovertemplate="Center<br>x: %{x:.3f} mm<br>y: %{y:.3f} mm<extra></extra>",
         )
     )
@@ -913,7 +991,7 @@ def update_spatial_binning_tab(
                 mode="text",
                 text=label_text,
                 textposition="middle center",
-                textfont=dict(size=13, color="black"),
+                textfont=dict(size=13, color="rgba(193, 0, 1, 1)"),
                 name="Bin labels",
                 showlegend=False,
                 hoverinfo="skip",
@@ -922,15 +1000,9 @@ def update_spatial_binning_tab(
     map_fig.update_layout(
         template="plotly_white",
         title=dict(text="Spatial bin map (radial x angular)", x=0.5, xanchor="center", pad=dict(t=10, b=6)),
-        margin=dict(l=55, r=30, t=95, b=110),
-        legend=dict(
-            orientation="h",
-            yanchor="top",
-            y=-0.22,
-            xanchor="left",
-            x=0,
-            bgcolor="rgba(255,255,255,0.85)",
-        ),
+        margin=dict(l=55, r=30, t=95, b=85),
+        coloraxis=map_coloraxis,
+        showlegend=False,
     )
     map_fig.update_xaxes(title_text="X (mm)", automargin=True, title_standoff=8, scaleanchor="y", scaleratio=1)
     map_fig.update_yaxes(title_text="Y (mm)", automargin=True, title_standoff=8)

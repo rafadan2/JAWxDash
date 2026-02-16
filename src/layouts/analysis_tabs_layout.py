@@ -76,7 +76,7 @@ analysis_tabs_layout = dbc.Tabs(
                                         dcc.Input(
                                             id=ids.Input.SPATIAL_BIN_RADIAL_COUNT,
                                             type="number",
-                                            value=2,
+                                            value=1,
                                             min=1,
                                             step=1,
                                             debounce=True,
