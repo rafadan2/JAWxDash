@@ -107,7 +107,6 @@ analysis_tabs_layout = dbc.Tabs(
                             "Radial boundaries are auto-calculated for near-equal point counts; angular bins are equal-angle sections.",
                             className="text-muted mt-2",
                         ),
-                        html.Div(id=ids.Div.SPATIAL_BIN_COUNTS, className="p-2"),
                         dbc.Row(
                             [
                                 dbc.Col(
@@ -121,6 +120,7 @@ analysis_tabs_layout = dbc.Tabs(
                             ],
                             className="g-2 mt-1",
                         ),
+                        html.Div(id=ids.Div.SPATIAL_BIN_COUNTS, className="p-2"),
                     ],
                     className="pt-2",
                 )

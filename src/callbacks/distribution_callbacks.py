@@ -901,24 +901,33 @@ def update_spatial_binning_tab(
         tick_vals.append(interior_bin_count + 1)
         tick_text.append("EE")
 
-    mean_x = []
-    mean_y = []
-    mean_std = []
+    interior_mean_x = []
+    interior_mean_y = []
+    interior_mean_std = []
+    edge_mean_x = []
+    edge_mean_y = []
+    edge_mean_std = []
+    edge_legend_group = "edge_excluded_group"
 
     for b in all_bin_indices:
         in_bin = bin_index == b
         y_bin = values[in_bin]
         count = int(y_bin.size)
         x_pos = bin_positions[b]
-        if count == 0:
-            mean_x.append(x_pos)
-            mean_y.append(np.nan)
-            mean_std.append(0.0)
-            continue
 
-        mean_x.append(x_pos)
-        mean_y.append(float(np.mean(y_bin)))
-        mean_std.append(float(np.std(y_bin, ddof=1)) if count > 1 else 0.0)
+        mean_value = float(np.mean(y_bin)) if count > 0 else np.nan
+        std_value = float(np.std(y_bin, ddof=1)) if count > 1 else 0.0
+        if b == edge_bin_index:
+            edge_mean_x.append(x_pos)
+            edge_mean_y.append(mean_value)
+            edge_mean_std.append(std_value)
+        else:
+            interior_mean_x.append(x_pos)
+            interior_mean_y.append(mean_value)
+            interior_mean_std.append(std_value)
+
+        if count == 0:
+            continue
 
         jitter_x = np.full(y_bin.size, x_pos, dtype=float) + rng.uniform(-0.18, 0.18, size=y_bin.size)
         series_name = "Edge excluded raw" if b == edge_bin_index else f"Bin {b + 1} raw"
@@ -929,7 +938,8 @@ def update_spatial_binning_tab(
                 mode="markers",
                 marker=dict(size=5, opacity=0.3),
                 name=series_name,
-                showlegend=False,
+                showlegend=bool(active_settings.get("ee_state") and b == edge_bin_index),
+                legendgroup=edge_legend_group if b == edge_bin_index else None,
                 hovertemplate=(
                     ("Edge excluded" if b == edge_bin_index else f"Bin {b + 1}")
                     + f"<br>{value_label}: "
@@ -940,21 +950,45 @@ def update_spatial_binning_tab(
 
     trend_fig.add_trace(
         go.Scatter(
-            x=np.asarray(mean_x),
-            y=np.asarray(mean_y),
+            x=np.asarray(interior_mean_x),
+            y=np.asarray(interior_mean_y),
             mode="lines+markers",
             line=dict(width=2, color="black"),
             marker=dict(size=7),
-            error_y=dict(type="data", array=np.asarray(mean_std), visible=True),
+            error_y=dict(type="data", array=np.asarray(interior_mean_std), visible=True),
             name="Bin mean +/- std",
+            showlegend=False,
             hovertemplate="Section %{x}<br>Mean: %{y:.6g}<extra></extra>",
         )
     )
+    if active_settings.get("ee_state") and edge_count > 0:
+        trend_fig.add_trace(
+            go.Scatter(
+                x=np.asarray(edge_mean_x),
+                y=np.asarray(edge_mean_y),
+                mode="markers",
+                marker=dict(size=7, color="black"),
+                error_y=dict(type="data", array=np.asarray(edge_mean_std), visible=True),
+                name="Edge excluded mean +/- std",
+                showlegend=False,
+                legendgroup=edge_legend_group,
+                hovertemplate="Section EE<br>Mean: %{y:.6g}<extra></extra>",
+            )
+        )
     trend_fig.update_layout(
         template="plotly_white",
         title=dict(text="Data and trend by spatial section", x=0.5, xanchor="center", pad=dict(t=10, b=6)),
-        margin=dict(l=55, r=30, t=95, b=85),
-        showlegend=False,
+        margin=dict(l=55, r=30, t=95, b=120),
+        showlegend=bool(active_settings.get("ee_state") and edge_count > 0),
+        legend=dict(
+            orientation="h",
+            yanchor="top",
+            y=-0.2,
+            xanchor="left",
+            x=0,
+            bgcolor="rgba(255,255,255,0.85)",
+            groupclick="togglegroup",
+        ),
     )
     trend_fig.update_xaxes(
         title_text="Section number",
