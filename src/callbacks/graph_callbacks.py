@@ -122,6 +122,79 @@ def _resolve_gradient_calc_grid_mode(settings):
     return _resolve_heatmap_grid_mode(settings)
 
 
+def _cross_2d(o, a, b):
+    return ((a[0] - o[0]) * (b[1] - o[1])) - ((a[1] - o[1]) * (b[0] - o[0]))
+
+
+def _build_convex_hull(points):
+    ordered = np.asarray(points, dtype=float)
+    if ordered.ndim != 2 or ordered.shape[1] != 2:
+        return None
+
+    ordered = np.unique(ordered, axis=0)
+    if ordered.shape[0] < 3:
+        return None
+
+    sort_idx = np.lexsort((ordered[:, 1], ordered[:, 0]))
+    ordered = ordered[sort_idx]
+
+    lower = []
+    for point in ordered:
+        while len(lower) >= 2 and _cross_2d(lower[-2], lower[-1], point) <= 0:
+            lower.pop()
+        lower.append(point)
+
+    upper = []
+    for point in ordered[::-1]:
+        while len(upper) >= 2 and _cross_2d(upper[-2], upper[-1], point) <= 0:
+            upper.pop()
+        upper.append(point)
+
+    hull = lower[:-1] + upper[:-1]
+    if len(hull) < 3:
+        return None
+
+    return np.asarray(hull, dtype=float)
+
+
+def _mask_points_inside_sample_footprint(sample_x, sample_y, query_x, query_y):
+    query_arr = np.asarray(query_x)
+    qx = np.asarray(query_x, dtype=float).ravel()
+    qy = np.asarray(query_y, dtype=float).ravel()
+    inside_mask = np.ones(qx.shape[0], dtype=bool)
+    if qx.size == 0:
+        return inside_mask.reshape(query_arr.shape)
+
+    sx = np.asarray(sample_x, dtype=float).ravel()
+    sy = np.asarray(sample_y, dtype=float).ravel()
+    valid_samples = np.isfinite(sx) & np.isfinite(sy)
+    if np.count_nonzero(valid_samples) < 3:
+        return inside_mask.reshape(query_arr.shape)
+
+    sample_points = np.column_stack([sx[valid_samples], sy[valid_samples]])
+    hull = _build_convex_hull(sample_points)
+    if hull is None:
+        return inside_mask.reshape(query_arr.shape)
+
+    vx = hull[:, 0]
+    vy = hull[:, 1]
+    ex = np.roll(vx, -1) - vx
+    ey = np.roll(vy, -1) - vy
+
+    footprint_span = max(float(np.max(vx) - np.min(vx)), float(np.max(vy) - np.min(vy)), 1.0)
+    tolerance = 1e-9 * footprint_span
+
+    chunk_size = 4096
+    for start in range(0, qx.size, chunk_size):
+        stop = min(start + chunk_size, qx.size)
+        local_x = qx[start:stop, None]
+        local_y = qy[start:stop, None]
+        cross = ex[None, :] * (local_y - vy[None, :]) - ey[None, :] * (local_x - vx[None, :])
+        inside_mask[start:stop] = np.all(cross >= -tolerance, axis=1)
+
+    return inside_mask.reshape(query_arr.shape)
+
+
 def _build_value_map(x_data, y_data, z_data, grid_mode="auto", grid_size=None, k_nearest=None):
     resolved_grid_mode = grid_mode if grid_mode in {"auto", "manual"} else "auto"
     return _interpolate_idw_grid(
@@ -215,6 +288,8 @@ def _interpolate_idw_grid(x_data, y_data, z_data, grid_mode="auto", grid_size=No
     spacing_estimate = np.sqrt(point_area) if point_area > 0 else 0.0
     mask_threshold = max(3.0 * spacing_estimate, 1e-6)
     z_interp[nearest_dist > mask_threshold] = np.nan
+    footprint_mask = _mask_points_inside_sample_footprint(x, y, flat_x, flat_y).ravel()
+    z_interp[~footprint_mask] = np.nan
 
     return xi, yi, z_interp.reshape(resolved_grid_size, resolved_grid_size)
 
@@ -583,8 +658,10 @@ def _resample_polar_to_cartesian_grid(
     query_r = np.sqrt((xx - center_x) ** 2 + (yy - center_y) ** 2).ravel()
     query_theta = np.mod(np.arctan2(yy - center_y, xx - center_x), 2 * np.pi).ravel()
     flat_values = np.full(query_r.shape, np.nan, dtype=float)
+    footprint_mask = _mask_points_inside_sample_footprint(x_data, y_data, xx.ravel(), yy.ravel()).ravel()
 
     valid_r = (query_r >= r_levels[0]) & (query_r <= r_levels[-1])
+    valid_r = valid_r & footprint_mask
     if not np.any(valid_r):
         return xi, yi, flat_values.reshape(resolved_grid_size, resolved_grid_size)
 
