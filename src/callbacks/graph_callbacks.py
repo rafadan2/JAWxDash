@@ -68,13 +68,15 @@ def _resolve_gradient_grid_size(point_count, grid_mode="auto", grid_size=None):
     return resolved_grid_size
 
 
+def _resolve_non_spatial_columns(file):
+    return [column for column in sorted(file.get_column_names()) if str(column).lower() not in {"x", "y"}]
+
+
 def _resolve_z_key(file, z_key):
-    if z_key and z_key in file.data:
+    if z_key and z_key in file.data and str(z_key).lower() not in {"x", "y"}:
         return z_key
 
-    columns = sorted(file.get_column_names())
-    if len(columns) > 1:
-        return columns[1]
+    columns = _resolve_non_spatial_columns(file)
     if columns:
         return columns[0]
 
@@ -870,8 +872,50 @@ def _clone_shapes(shapes):
     return [shape.copy() for shape in shapes]
 
 
+def _apply_map_layout_and_shapes(figure, settings, x_data, y_data, stage_outline=None, base_shapes=None):
+    shapes = _clone_shapes(base_shapes or [])
+
+    if settings["sample_outline"]:
+        shapes.append(generate_outline(settings))
+
+    if settings["stage_state"]:
+        if stage_outline is None:
+            cwd = os.getcwd()
+            dxf_file = os.path.join(cwd, "src/assets/jaw_stage_outline.dxf")
+            stage_outline = dxf_to_path(dxf_file)
+        shapes.extend(_clone_shapes(stage_outline))
+
+    if settings["sample_outline"] and settings["ee_state"]:
+        if settings["ee_type"] == "radial":
+            shapes.append(radial_edge_exclusion_outline(settings))
+        elif settings["ee_type"] == "uniform":
+            shapes.append(uniform_edge_exclusion_outline(settings))
+
+    x_values = np.asarray(x_data, dtype=float)
+    y_values = np.asarray(y_data, dtype=float)
+    finite_mask = np.isfinite(x_values) & np.isfinite(y_values)
+    if not np.any(finite_mask):
+        figure.update_layout(shapes=shapes)
+        return figure
+
+    x_plot = x_values[finite_mask]
+    y_plot = y_values[finite_mask]
+    xmin, xmax = float(np.min(x_plot)), float(np.max(x_plot))
+    ymin, ymax = float(np.min(y_plot)), float(np.max(y_plot))
+
+    span = max(xmax - xmin, ymax - ymin, 1e-6)
+    scale_factor = 0.2
+
+    figure.update_layout(
+        shapes=shapes,
+        xaxis=dict(range=[xmin - scale_factor * span, xmax + scale_factor * span]),
+        yaxis=dict(range=[ymin - scale_factor * span, ymax + scale_factor * span]),
+    )
+    return figure
+
+
 def _resolve_batch_z_keys(file):
-    return [column for column in sorted(file.get_column_names()) if column.lower() not in {"x", "y"}]
+    return _resolve_non_spatial_columns(file)
 
 
 def _safe_filename_fragment(value):
@@ -1074,31 +1118,13 @@ def _build_main_figure(file, settings, z_label=None, force_two_sigma=False, stag
                 [gen_spot(x, y, c, settings["spot_size"], settings["angle_of_incident"]) for x, y, c in zip(x_plot, y_plot, colors)]
             )
 
-    if settings["sample_outline"]:
-        shapes.append(generate_outline(settings))
-
-    if settings["stage_state"]:
-        if stage_outline is None:
-            cwd = os.getcwd()
-            dxf_file = os.path.join(cwd, "src/assets/jaw_stage_outline.dxf")
-            stage_outline = dxf_to_path(dxf_file)
-        shapes.extend(_clone_shapes(stage_outline))
-
-    if settings["sample_outline"] and settings["ee_state"]:
-        if settings["ee_type"] == "radial":
-            shapes.append(radial_edge_exclusion_outline(settings))
-        elif settings["ee_type"] == "uniform":
-            shapes.append(uniform_edge_exclusion_outline(settings))
-
-    xmin, xmax = min(x_data), max(x_data)
-    ymin, ymax = min(y_data), max(y_data)
-    scale_factor = 0.2
-    scale_range = xmax - xmin
-
-    figure.update_layout(
-        shapes=shapes,
-        xaxis=dict(range=[xmin - scale_factor * scale_range, xmax + scale_factor * scale_range]),
-        yaxis=dict(range=[ymin - scale_factor * scale_range, ymax + scale_factor * scale_range]),
+    _apply_map_layout_and_shapes(
+        figure,
+        settings,
+        x_data,
+        y_data,
+        stage_outline=stage_outline,
+        base_shapes=shapes,
     )
 
     return figure, z_label
@@ -1141,7 +1167,7 @@ def update_figure(selected_file:str, uploaded_files:dict, settings:dict):
         return figure, no_update
 
     file = Ellipsometry.from_path_or_stream(uploaded_files[selected_file])
-    z_options = sorted(file.get_column_names())
+    z_options = _resolve_non_spatial_columns(file)
 
     rendered_figure, _ = _build_main_figure(file, settings, z_label=settings.get("z_data_value"))
 

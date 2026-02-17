@@ -294,12 +294,10 @@ def reset_offsets_for_circle_outline(sample_outline):
 
 
 def _resolve_z_key(file, z_key):
+    columns = [column for column in sorted(file.get_column_names()) if str(column).lower() not in {"x", "y"}]
     if z_key:
-        return z_key if z_key in file.data else None
+        return z_key if z_key in columns else None
 
-    columns = sorted(file.get_column_names())
-    if len(columns) > 1:
-        return columns[1]
     if columns:
         return columns[0]
     return None
