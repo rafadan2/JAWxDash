@@ -163,6 +163,38 @@ analysis_tabs_layout = dbc.Tabs(
                             className="g-2 mt-1",
                         ),
                         html.Div(id=ids.Div.SPATIAL_BIN_COUNTS, className="p-2"),
+                        dbc.Card(
+                            [
+                                dbc.CardHeader("Batch Spatial Binning Export"),
+                                dbc.CardBody(
+                                    [
+                                        html.Div(
+                                            "Configure accepted variation per Z parameter.",
+                                            className="text-muted small",
+                                        ),
+                                        html.Div(
+                                            "Batch export always uses 2\u03c3 z-scale limits for each Z parameter.",
+                                            className="text-muted small",
+                                        ),
+                                        html.Div(
+                                            id=ids.Input.SPATIAL_BIN_BATCH_RULES,
+                                            className="mt-2",
+                                        ),
+                                        html.Div(
+                                            "Rows are auto-populated from detected Z parameters. Tick Exclude to skip a parameter.",
+                                            className="text-muted small mt-2",
+                                        ),
+                                        dbc.Button(
+                                            "Batch Download Spatial Binning",
+                                            id=ids.Button.BATCH_SPATIAL_BINNING,
+                                            color="primary",
+                                            className="mt-2",
+                                        ),
+                                    ]
+                                ),
+                            ],
+                            className="mt-2",
+                        ),
                     ],
                     className="pt-2",
                 )

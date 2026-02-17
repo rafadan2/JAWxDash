@@ -5,6 +5,7 @@ class Button:
     Z_SCALE_2SIGMA = "btn_z_scale_2sigma"
     Z_SCALE_AUTO = "btn_z_scale_auto"
     BATCH_MAIN_PLOTS = "btn_batch_main_plots"
+    BATCH_SPATIAL_BINNING = "btn_batch_spatial_binning"
 
 
 class Div:
@@ -53,6 +54,7 @@ class Input:
     SPATIAL_BIN_RADIAL_COUNT = "input_spatial_bin_radial_count"
     SPATIAL_BIN_ANGULAR_COUNT = "input_spatial_bin_angular_count"
     SPATIAL_BIN_ACCEPTED_VARIATION = "input_spatial_bin_accepted_variation"
+    SPATIAL_BIN_BATCH_RULES = "input_spatial_bin_batch_rules"
 
 
 class RadioItems:
@@ -81,6 +83,7 @@ class Store:
     DEFAULT_SETTINGS = "store_default_settings"
     SETTINGS = "store_settings"
     BATCH_MAIN_PLOTS_PAYLOAD = "store_batch_main_plots_payload"
+    BATCH_SPATIAL_BINNING_PAYLOAD = "store_batch_spatial_binning_payload"
 
 
 class Tabs:

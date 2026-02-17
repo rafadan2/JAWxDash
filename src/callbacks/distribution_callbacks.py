@@ -1,7 +1,11 @@
-from dash import callback, html, no_update, Output, Input, State
+from dash import callback, clientside_callback, dcc, html, no_update, Output, Input, State, ALL, MATCH
+import json
 import numpy as np
 import plotly.graph_objs as go
 from plotly.subplots import make_subplots
+from itertools import zip_longest
+import re
+import time
 
 
 from src import ids
@@ -51,6 +55,709 @@ def _safe_float(value, default=np.nan):
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _safe_filename_fragment(value):
+    sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value).strip())
+    sanitized = sanitized.strip("._-")
+    return sanitized or "plot"
+
+
+def _resolve_spatial_batch_z_keys(file):
+    return [column for column in sorted(file.get_column_names()) if column.lower() not in {"x", "y"}]
+
+
+def _normalize_spatial_batch_mode(mode_raw):
+    mode_text = str(mode_raw or "").strip().lower()
+    if mode_text in {"percent", "percentage", "pct", "%", "p"}:
+        return "percent"
+    if mode_text in {"sigma", "sig", "s", "\u03c3"}:
+        return "sigma"
+    return None
+
+
+def _default_spatial_batch_variation_value(mode):
+    return 2.0 if mode == "sigma" else 5.0
+
+
+def _normalize_spatial_batch_z_name(z_name):
+    collapsed = re.sub(r"[^a-z0-9]+", " ", str(z_name or "").lower())
+    return " ".join(collapsed.split())
+
+
+def _spatial_batch_default_preset(z_name, fallback_mode):
+    mode = fallback_mode if fallback_mode in {"percent", "sigma"} else "percent"
+    value = _default_spatial_batch_variation_value(mode)
+    excluded = False
+
+    normalized = _normalize_spatial_batch_z_name(z_name)
+
+    if normalized in {"a", "b", "mse"}:
+        return dict(mode="sigma", value=2.0, excluded=False)
+
+    if normalized in {"fit ok", "hardware ok", "sigint", "tilt x", "tilt y", "z align"}:
+        return dict(mode=mode, value=value, excluded=True)
+
+    if re.fullmatch(r"point(?:\s+(?:number|no|num))?", normalized):
+        return dict(mode=mode, value=value, excluded=True)
+
+    if "n of cauchy" in normalized:
+        return dict(mode="sigma", value=2.0, excluded=False)
+
+    return dict(mode=mode, value=value, excluded=excluded)
+
+
+def _parse_spatial_batch_component_rules(
+    mode_values,
+    mode_ids,
+    value_values,
+    value_ids,
+    exclude_values,
+    exclude_ids,
+):
+    rules = {}
+    excluded_z = set()
+    errors = []
+    mode_values = mode_values or []
+    mode_ids = mode_ids or []
+    value_values = value_values or []
+    value_ids = value_ids or []
+    exclude_values = exclude_values or []
+    exclude_ids = exclude_ids or []
+    if not mode_ids and not value_ids and not exclude_ids:
+        return rules, excluded_z, errors
+
+    modes_by_z = {}
+    values_by_z = {}
+
+    for idx, component_id in enumerate(mode_ids, start=1):
+        if not isinstance(component_id, dict):
+            errors.append(f"row {idx}: invalid mode selector id")
+            continue
+
+        z_name = str(component_id.get("z", "")).strip()
+        if not z_name:
+            continue
+
+        mode_raw = mode_values[idx - 1] if idx - 1 < len(mode_values) else None
+        mode = _normalize_spatial_batch_mode(mode_raw)
+        if not mode:
+            errors.append(f"row {idx} ({z_name}): unknown mode '{mode_raw}'")
+            continue
+        modes_by_z[z_name.lower()] = mode
+
+    for idx, component_id in enumerate(value_ids, start=1):
+        if not isinstance(component_id, dict):
+            errors.append(f"row {idx}: invalid value input id")
+            continue
+
+        z_name = str(component_id.get("z", "")).strip()
+        if not z_name:
+            continue
+
+        value_raw = value_values[idx - 1] if idx - 1 < len(value_values) else None
+        value = _safe_float(value_raw, default=np.nan)
+        if not np.isfinite(value) or value < 0:
+            errors.append(f"row {idx} ({z_name}): invalid value '{value_raw}'")
+            continue
+        values_by_z[z_name.lower()] = float(value)
+
+    for idx, component_id in enumerate(exclude_ids, start=1):
+        if not isinstance(component_id, dict):
+            errors.append(f"row {idx}: invalid exclude checkbox id")
+            continue
+
+        z_name = str(component_id.get("z", "")).strip()
+        if not z_name:
+            continue
+
+        exclude_raw = exclude_values[idx - 1] if idx - 1 < len(exclude_values) else []
+        is_excluded = False
+        if isinstance(exclude_raw, (list, tuple, set)):
+            is_excluded = "exclude" in exclude_raw
+        elif isinstance(exclude_raw, bool):
+            is_excluded = exclude_raw
+
+        if is_excluded:
+            excluded_z.add(z_name.lower())
+
+    for z_name in set(modes_by_z).intersection(values_by_z):
+        rules[z_name] = dict(mode=modes_by_z[z_name], value=values_by_z[z_name])
+
+    for z_name in set(modes_by_z).difference(values_by_z):
+        errors.append(f"{z_name}: missing value")
+    for z_name in set(values_by_z).difference(modes_by_z):
+        errors.append(f"{z_name}: missing mode")
+
+    return rules, excluded_z, errors
+
+
+def _children_as_list(component):
+    if component is None:
+        return []
+    children = getattr(component, "children", None)
+    if children is None:
+        return []
+    if isinstance(children, (list, tuple)):
+        return list(children)
+    return [children]
+
+
+def _component_text(component):
+    if component is None:
+        return ""
+    if isinstance(component, (str, int, float, np.number)):
+        return str(component).strip()
+
+    children = getattr(component, "children", None)
+    if children is None:
+        return ""
+
+    parts = []
+    if isinstance(children, (list, tuple)):
+        for child in children:
+            text = _component_text(child)
+            if text:
+                parts.append(text)
+    else:
+        text = _component_text(children)
+        if text:
+            parts.append(text)
+    return " ".join(parts).strip()
+
+
+def _component_type_name(component):
+    return getattr(getattr(component, "__class__", None), "__name__", "").lower()
+
+
+def _find_first_component_by_type(component, type_name):
+    if component is None:
+        return None
+    if _component_type_name(component) == str(type_name or "").lower():
+        return component
+
+    for child in _children_as_list(component):
+        found = _find_first_component_by_type(child, type_name)
+        if found is not None:
+            return found
+    return None
+
+
+def _extract_html_table_data(table_component):
+    headers = []
+    rows = []
+    if table_component is None:
+        return headers, rows
+
+    table_children = _children_as_list(table_component)
+    thead = next((child for child in table_children if _component_type_name(child) == "thead"), None)
+    tbody = next((child for child in table_children if _component_type_name(child) == "tbody"), None)
+
+    if thead is not None:
+        header_rows = _children_as_list(thead)
+        if header_rows:
+            first_header_row = header_rows[0]
+            headers = [_component_text(cell) for cell in _children_as_list(first_header_row)]
+
+    if tbody is not None:
+        for row_component in _children_as_list(tbody):
+            row_values = [_component_text(cell) for cell in _children_as_list(row_component)]
+            if any(value.strip() for value in row_values):
+                rows.append(row_values)
+
+    return headers, rows
+
+
+def _rows_to_columns(rows, column_count):
+    row_list = [list(row) for row in (rows or [])]
+    if column_count < 1:
+        column_count = 1
+
+    if not row_list:
+        row_list = [[""] * column_count]
+
+    normalized_rows = []
+    for row in row_list:
+        padded = list(row[:column_count])
+        if len(padded) < column_count:
+            padded.extend([""] * (column_count - len(padded)))
+        normalized_rows.append(padded)
+
+    return [list(column) for column in zip_longest(*normalized_rows, fillvalue="")]
+
+
+def _table_fill_colors(column_count, row_count):
+    row_colors = [
+        "rgb(255,255,255)" if idx % 2 == 0 else "rgb(248,249,250)"
+        for idx in range(max(row_count, 1))
+    ]
+    return [row_colors for _ in range(max(column_count, 1))]
+
+
+def _parse_percentage_from_text(value):
+    match = re.search(r"[-+]?\d*\.?\d+", str(value or ""))
+    if not match:
+        return np.nan
+    return _safe_float(match.group(0), default=np.nan)
+
+
+def _conformance_pct_color(percent_value):
+    if not np.isfinite(percent_value):
+        return "rgb(33,37,41)"
+    if percent_value >= 95.0:
+        return "rgb(25,135,84)"
+    if percent_value >= 80.0:
+        return "rgb(255,193,7)"
+    return "rgb(220,53,69)"
+
+
+def _build_summary_card_overlays(summary_rows):
+    context_text = ""
+    cards = []
+    for label, value in summary_rows or []:
+        label_text = str(label or "").strip()
+        value_text = str(value or "").strip()
+        if not label_text and not value_text:
+            continue
+        if label_text.lower() == "context":
+            context_text = value_text
+            continue
+        cards.append((label_text or "Summary", value_text or "-"))
+
+    if not cards:
+        cards = [("Summary", "No summary values available.")]
+
+    card_count = len(cards)
+    card_columns = min(4, max(card_count, 1))
+    card_rows = int(np.ceil(card_count / card_columns))
+
+    left_margin = 0.02
+    right_margin = 0.98
+    horizontal_gap = 0.018 if card_columns > 1 else 0.0
+    top_bound = 0.80 if context_text else 0.94
+    bottom_bound = 0.08
+    vertical_gap = 0.08 if card_rows > 1 else 0.0
+
+    card_width = (
+        (right_margin - left_margin - horizontal_gap * (card_columns - 1))
+        / max(card_columns, 1)
+    )
+    card_height = (
+        (top_bound - bottom_bound - vertical_gap * (card_rows - 1))
+        / max(card_rows, 1)
+    )
+
+    shapes = []
+    annotations = []
+
+    if context_text:
+        annotations.append(
+            dict(
+                x=0.5,
+                y=0.98,
+                xref="x3",
+                yref="y3",
+                text=context_text,
+                showarrow=False,
+                xanchor="center",
+                yanchor="top",
+                font=dict(size=11, color="rgb(108,117,125)"),
+            )
+        )
+
+    for card_idx, (label, value) in enumerate(cards):
+        row_idx = card_idx // card_columns
+        col_idx = card_idx % card_columns
+
+        x0 = left_margin + col_idx * (card_width + horizontal_gap)
+        x1 = x0 + card_width
+        y1 = top_bound - row_idx * (card_height + vertical_gap)
+        y0 = y1 - card_height
+
+        shapes.append(
+            dict(
+                type="rect",
+                xref="x3",
+                yref="y3",
+                x0=x0,
+                x1=x1,
+                y0=y0,
+                y1=y1,
+                line=dict(color="rgb(222,226,230)", width=1),
+                fillcolor="rgb(248,249,250)",
+                layer="below",
+            )
+        )
+
+        pad_x = card_width * 0.04
+        annotations.append(
+            dict(
+                x=x0 + pad_x,
+                y=y1 - (card_height * 0.15),
+                xref="x3",
+                yref="y3",
+                text=str(label).upper(),
+                showarrow=False,
+                xanchor="left",
+                yanchor="top",
+                align="left",
+                font=dict(size=10, color="rgb(108,117,125)"),
+            )
+        )
+        annotations.append(
+            dict(
+                x=x0 + pad_x,
+                y=y0 + (card_height * 0.34),
+                xref="x3",
+                yref="y3",
+                text=f"<b>{value}</b>",
+                showarrow=False,
+                xanchor="left",
+                yanchor="middle",
+                align="left",
+                font=dict(size=12, color="rgb(33,37,41)"),
+            )
+        )
+
+    return shapes, annotations
+
+
+def _extract_spatial_summary_snapshot(count_panel):
+    summary = {
+        "title": "Spatial bin summary",
+        "subtitle": "",
+        "summary_rows": [],
+        "radial_title": "Radial boundaries (mm)",
+        "radial_subtitle": "",
+        "radial_headers": [],
+        "radial_rows": [],
+        "conformance_title": "Conformance by section",
+        "conformance_headers": [],
+        "conformance_rows": [],
+    }
+
+    if isinstance(count_panel, str):
+        summary["summary_rows"] = [("Summary", count_panel)]
+        return summary
+
+    root_children = _children_as_list(count_panel)
+    if not root_children:
+        return summary
+
+    title_text = _component_text(root_children[0]) if len(root_children) > 0 else ""
+    subtitle_text = _component_text(root_children[1]) if len(root_children) > 1 else ""
+    if title_text:
+        summary["title"] = title_text
+    summary["subtitle"] = subtitle_text
+
+    if len(root_children) > 2:
+        cards_container = root_children[2]
+        for card in _children_as_list(cards_container):
+            card_children = _children_as_list(card)
+            if len(card_children) < 2:
+                continue
+            label = _component_text(card_children[0])
+            value = _component_text(card_children[1])
+            if label or value:
+                summary["summary_rows"].append((label, value))
+
+    if summary["subtitle"]:
+        summary["summary_rows"].insert(0, ("Context", summary["subtitle"]))
+
+    if len(root_children) > 3:
+        sections_row = root_children[3]
+        section_columns = _children_as_list(sections_row)
+
+        if len(section_columns) > 0:
+            radial_column = section_columns[0]
+            radial_children = _children_as_list(radial_column)
+            if radial_children:
+                radial_title = _component_text(radial_children[0])
+                if radial_title:
+                    summary["radial_title"] = radial_title
+            if len(radial_children) > 1:
+                summary["radial_subtitle"] = _component_text(radial_children[1])
+
+            radial_table = _find_first_component_by_type(radial_column, "table")
+            radial_headers, radial_rows = _extract_html_table_data(radial_table)
+            summary["radial_headers"] = radial_headers
+            summary["radial_rows"] = radial_rows
+
+        if len(section_columns) > 1:
+            conformance_column = section_columns[1]
+            conformance_children = _children_as_list(conformance_column)
+            if conformance_children:
+                conformance_title = _component_text(conformance_children[0])
+                if conformance_title:
+                    summary["conformance_title"] = conformance_title
+
+            conformance_table = _find_first_component_by_type(conformance_column, "table")
+            conformance_headers, conformance_rows = _extract_html_table_data(conformance_table)
+            summary["conformance_headers"] = conformance_headers
+            summary["conformance_rows"] = conformance_rows
+
+    if not summary["summary_rows"]:
+        summary["summary_rows"] = [("Summary", "No summary values available.")]
+
+    if not summary["radial_rows"]:
+        summary["radial_rows"] = [["No radial boundary data available.", "", ""]]
+    if not summary["conformance_rows"]:
+        summary["conformance_rows"] = [["No conformance data available.", "", "", "", ""]]
+
+    return summary
+
+
+def _copy_axis_layout(target_axis, source_axis):
+    if source_axis is None:
+        return
+    source_dict = source_axis.to_plotly_json()
+    blocked_keys = {"domain", "anchor", "overlaying", "position", "matches"}
+    for key, value in source_dict.items():
+        if key in blocked_keys:
+            continue
+        target_axis[key] = value
+
+
+def _remap_axis_reference(reference, axis_letter):
+    if not isinstance(reference, str):
+        return reference
+    if reference == axis_letter:
+        return f"{axis_letter}2"
+    if reference == f"{axis_letter} domain":
+        return f"{axis_letter}2 domain"
+    return reference
+
+
+def _build_spatial_batch_snapshot_figure(z_key, map_fig, trend_fig, count_panel):
+    summary = _extract_spatial_summary_snapshot(count_panel)
+    summary_rows = summary["summary_rows"]
+    summary_shapes, summary_annotations = _build_summary_card_overlays(summary_rows)
+
+    radial_headers = summary["radial_headers"] or ["Bin", "r min", "r max"]
+    radial_rows = summary["radial_rows"]
+    radial_display_rows = []
+    for row in radial_rows:
+        normalized_row = list(row[: len(radial_headers)])
+        if len(normalized_row) < len(radial_headers):
+            normalized_row.extend([""] * (len(radial_headers) - len(normalized_row)))
+        if normalized_row and str(normalized_row[0]).strip():
+            normalized_row[0] = f"<b>{normalized_row[0]}</b>"
+        radial_display_rows.append(normalized_row)
+    radial_columns = _rows_to_columns(radial_display_rows, len(radial_headers))
+
+    conformance_headers = summary["conformance_headers"] or [
+        "Section",
+        "Region",
+        "Points",
+        "Conformal",
+        "Conformal %",
+    ]
+    conformance_rows = summary["conformance_rows"]
+    conformance_pct_index = next(
+        (idx for idx, header in enumerate(conformance_headers) if "%" in str(header)),
+        None,
+    )
+    if conformance_pct_index is None and conformance_headers:
+        conformance_pct_index = len(conformance_headers) - 1
+
+    conformance_display_rows = []
+    conformance_row_fill = []
+    conformance_pct_colors = []
+    for row_idx, row in enumerate(conformance_rows):
+        normalized_row = list(row[: len(conformance_headers)])
+        if len(normalized_row) < len(conformance_headers):
+            normalized_row.extend([""] * (len(conformance_headers) - len(normalized_row)))
+
+        section_text = str(normalized_row[0]).strip().lower() if normalized_row else ""
+        region_text = str(normalized_row[1]).strip().lower() if len(normalized_row) > 1 else ""
+        is_edge_row = section_text == "ee" or "edge excluded" in region_text
+        if is_edge_row:
+            conformance_row_fill.append("rgb(233,236,239)")
+        else:
+            conformance_row_fill.append("rgb(255,255,255)" if row_idx % 2 == 0 else "rgb(248,249,250)")
+
+        if normalized_row and str(normalized_row[0]).strip():
+            normalized_row[0] = f"<b>{normalized_row[0]}</b>"
+
+        pct_color = "rgb(33,37,41)"
+        if conformance_pct_index is not None and conformance_pct_index < len(normalized_row):
+            pct_text = str(normalized_row[conformance_pct_index]).strip()
+            pct_value = _parse_percentage_from_text(pct_text)
+            pct_color = _conformance_pct_color(pct_value)
+            if pct_text:
+                normalized_row[conformance_pct_index] = f"<b>{pct_text}</b>"
+        conformance_pct_colors.append(pct_color)
+        conformance_display_rows.append(normalized_row)
+
+    conformance_columns = _rows_to_columns(conformance_display_rows, len(conformance_headers))
+    conformance_fill_colors = [list(conformance_row_fill) for _ in range(max(len(conformance_headers), 1))]
+    conformance_font_colors = [
+        ["rgb(33,37,41)" for _ in range(max(len(conformance_display_rows), 1))]
+        for _ in range(max(len(conformance_headers), 1))
+    ]
+    if (
+        conformance_pct_index is not None
+        and conformance_pct_index < len(conformance_font_colors)
+        and conformance_pct_colors
+    ):
+        for row_idx, pct_color in enumerate(conformance_pct_colors):
+            if row_idx < len(conformance_font_colors[conformance_pct_index]):
+                conformance_font_colors[conformance_pct_index][row_idx] = pct_color
+
+    snapshot_fig = make_subplots(
+        rows=3,
+        cols=2,
+        specs=[
+            [{"type": "xy"}, {"type": "xy"}],
+            [{"type": "xy", "colspan": 2}, None],
+            [{"type": "table"}, {"type": "table"}],
+        ],
+        row_heights=[0.48, 0.24, 0.28],
+        column_widths=[0.66, 0.34],
+        horizontal_spacing=0.14,
+        vertical_spacing=0.08,
+        subplot_titles=(
+            "Spatial bin map",
+            "Data and trend by spatial section",
+            summary["title"],
+            summary["radial_title"],
+            summary["conformance_title"],
+        ),
+    )
+    base_subplot_annotations = [
+        annotation.to_plotly_json() for annotation in (snapshot_fig.layout.annotations or [])
+    ]
+
+    for trace in map_fig.data:
+        snapshot_fig.add_trace(trace, row=1, col=1)
+    for trace in trend_fig.data:
+        snapshot_fig.add_trace(trace, row=1, col=2)
+
+    snapshot_fig.update_xaxes(
+        row=2,
+        col=1,
+        visible=False,
+        range=[0, 1],
+        fixedrange=True,
+        showgrid=False,
+        zeroline=False,
+    )
+    snapshot_fig.update_yaxes(
+        row=2,
+        col=1,
+        visible=False,
+        range=[0, 1],
+        fixedrange=True,
+        showgrid=False,
+        zeroline=False,
+    )
+
+    snapshot_fig.add_trace(
+        go.Table(
+            header=dict(
+                values=[f"<b>{header}</b>" for header in radial_headers],
+                fill_color="rgb(240,240,240)",
+                align="left",
+                font=dict(size=12),
+            ),
+            cells=dict(
+                values=radial_columns,
+                align="left",
+                font=dict(size=11),
+                height=22,
+                fill_color=_table_fill_colors(len(radial_headers), len(radial_display_rows)),
+            ),
+        ),
+        row=3,
+        col=1,
+    )
+
+    snapshot_fig.add_trace(
+        go.Table(
+            header=dict(
+                values=[f"<b>{header}</b>" for header in conformance_headers],
+                fill_color="rgb(240,240,240)",
+                align="left",
+                font=dict(size=12),
+            ),
+            cells=dict(
+                values=conformance_columns,
+                align="left",
+                font=dict(size=11, color=conformance_font_colors),
+                height=22,
+                fill_color=conformance_fill_colors,
+            ),
+        ),
+        row=3,
+        col=2,
+    )
+
+    _copy_axis_layout(snapshot_fig.layout.xaxis, map_fig.layout.xaxis)
+    _copy_axis_layout(snapshot_fig.layout.yaxis, map_fig.layout.yaxis)
+    _copy_axis_layout(snapshot_fig.layout.xaxis2, trend_fig.layout.xaxis)
+    _copy_axis_layout(snapshot_fig.layout.yaxis2, trend_fig.layout.yaxis)
+
+    map_shapes = []
+    for shape in (map_fig.layout.shapes or []):
+        map_shapes.append(shape.to_plotly_json())
+
+    trend_shapes = []
+    for shape in (trend_fig.layout.shapes or []):
+        shape_json = shape.to_plotly_json()
+        shape_json["xref"] = _remap_axis_reference(shape_json.get("xref"), "x")
+        shape_json["yref"] = _remap_axis_reference(shape_json.get("yref"), "y")
+        trend_shapes.append(shape_json)
+
+    map_annotations = []
+    for annotation in (map_fig.layout.annotations or []):
+        map_annotations.append(annotation.to_plotly_json())
+
+    trend_annotations = []
+    for annotation in (trend_fig.layout.annotations or []):
+        annotation_json = annotation.to_plotly_json()
+        annotation_json["xref"] = _remap_axis_reference(annotation_json.get("xref"), "x")
+        annotation_json["yref"] = _remap_axis_reference(annotation_json.get("yref"), "y")
+        trend_annotations.append(annotation_json)
+
+    layout_updates = dict(
+        template="plotly_white",
+        title=dict(text=f"Spatial binning snapshot: {z_key}", x=0.5, xanchor="center", pad=dict(t=10, b=6)),
+        margin=dict(l=55, r=40, t=100, b=40),
+        showlegend=False,
+    )
+
+    map_coloraxis = getattr(map_fig.layout, "coloraxis", None)
+    if map_coloraxis is not None:
+        coloraxis_json = map_coloraxis.to_plotly_json()
+        if coloraxis_json:
+            x_domain = getattr(snapshot_fig.layout.xaxis, "domain", None)
+            y_domain = getattr(snapshot_fig.layout.yaxis, "domain", None)
+            colorbar = coloraxis_json.get("colorbar", {})
+            if (
+                isinstance(x_domain, (list, tuple))
+                and len(x_domain) == 2
+                and isinstance(y_domain, (list, tuple))
+                and len(y_domain) == 2
+            ):
+                colorbar.update(
+                    x=min(float(x_domain[1]) + 0.012, 0.99),
+                    xanchor="left",
+                    y=float((y_domain[0] + y_domain[1]) / 2.0),
+                    yanchor="middle",
+                    len=float(y_domain[1] - y_domain[0]),
+                    lenmode="fraction",
+                    thickness=16,
+                )
+            coloraxis_json["colorbar"] = colorbar
+            layout_updates["coloraxis"] = coloraxis_json
+
+    snapshot_fig.update_layout(
+        **layout_updates,
+        shapes=map_shapes + trend_shapes + summary_shapes,
+        annotations=base_subplot_annotations + map_annotations + trend_annotations + summary_annotations,
+    )
+
+    return snapshot_fig
 
 
 def _linear_fit(x_values, y_values):
@@ -640,6 +1347,102 @@ def update_spatial_bin_variation_default(variation_mode):
 
 
 @callback(
+    Output(ids.Input.SPATIAL_BIN_BATCH_RULES, "children"),
+    Input(ids.DropDown.UPLOADED_FILES, "value"),
+    Input(ids.Store.UPLOADED_FILES, "data"),
+    State(ids.RadioItems.SPATIAL_BIN_ACCEPTED_VARIATION_MODE, "value"),
+)
+def populate_spatial_batch_rules_table(
+    selected_file,
+    stored_files,
+    accepted_variation_mode,
+):
+    if not selected_file or not stored_files or selected_file not in stored_files:
+        return html.Div("Select a file to configure batch rules.", className="text-muted small")
+
+    file = Ellipsometry.from_path_or_stream(stored_files[selected_file])
+    z_keys = _resolve_spatial_batch_z_keys(file)
+    if not z_keys:
+        return html.Div("No Z parameters available for batch export.", className="text-muted small")
+
+    default_mode = accepted_variation_mode if accepted_variation_mode in {"percent", "sigma"} else "percent"
+
+    rows = []
+    for z_key in z_keys:
+        preset = _spatial_batch_default_preset(z_key, default_mode)
+        rows.append(
+            html.Tr(
+                [
+                    html.Td(z_key, className="fw-semibold"),
+                    html.Td(
+                        dcc.RadioItems(
+                            id={"type": "spatial_batch_mode", "z": z_key},
+                            options=[
+                                {"label": "Percent", "value": "percent"},
+                                {"label": "\u03c3", "value": "sigma"},
+                            ],
+                            value=preset["mode"],
+                            inline=True,
+                            className="mb-0",
+                            labelStyle={"margin-right": "14px", "margin-bottom": "0"},
+                        )
+                    ),
+                    html.Td(
+                        dcc.Input(
+                            id={"type": "spatial_batch_value", "z": z_key},
+                            type="number",
+                            value=float(preset["value"]),
+                            min=0,
+                            step=0.1,
+                            debounce=True,
+                            className="form-control form-control-sm",
+                        ),
+                        style={"minWidth": "120px", "maxWidth": "180px"},
+                    ),
+                    html.Td(
+                        dcc.Checklist(
+                            id={"type": "spatial_batch_exclude", "z": z_key},
+                            options=[{"label": "", "value": "exclude"}],
+                            value=["exclude"] if preset["excluded"] else [],
+                            className="mb-0",
+                            style={"display": "flex", "justifyContent": "center"},
+                        ),
+                    ),
+                ]
+            )
+        )
+
+    return html.Div(
+        html.Table(
+            [
+                html.Thead(
+                    html.Tr(
+                        [
+                            html.Th("Z parameter"),
+                            html.Th("Mode"),
+                            html.Th("Value"),
+                            html.Th("Exclude"),
+                        ]
+                    )
+                ),
+                html.Tbody(rows),
+            ],
+            className="table table-sm table-striped table-bordered align-middle mb-0",
+        ),
+        className="table-responsive",
+    )
+
+
+@callback(
+    Output({"type": "spatial_batch_value", "z": MATCH}, "value"),
+    Input({"type": "spatial_batch_mode", "z": MATCH}, "value"),
+    prevent_initial_call=True,
+)
+def update_spatial_batch_row_default_value(mode):
+    return _default_spatial_batch_variation_value(mode)
+
+
+@callback(
     Output(ids.Graph.SPATIAL_BIN_MAP, "figure"),
     Output(ids.Graph.SPATIAL_BIN_TRENDS, "figure"),
     Output(ids.Div.SPATIAL_BIN_COUNTS, "children"),
@@ -837,11 +1640,12 @@ def update_spatial_binning_tab(
     label_y = []
     label_text = []
     map_active_values = values[np.isfinite(values)]
+    force_two_sigma_map_scale = bool(active_settings.get("_spatial_force_two_sigma_z_scale"))
     map_zmin, map_zmax, map_manual_scale = _resolve_z_limits(
         map_active_values,
         active_settings.get("z_scale_min"),
         active_settings.get("z_scale_max"),
-        force_two_sigma=False,
+        force_two_sigma=force_two_sigma_map_scale,
     )
     map_colorbar = dict(title=dict(text=value_label, side="top"))
     map_coloraxis = dict(
@@ -1339,4 +2143,228 @@ def update_spatial_binning_tab(
         className="border rounded bg-white p-3",
     )
     return map_fig, trend_fig, count_panel
+
+
+@callback(
+    Output(ids.Store.BATCH_SPATIAL_BINNING_PAYLOAD, "data"),
+    Input(ids.Button.BATCH_SPATIAL_BINNING, "n_clicks"),
+    State(ids.DropDown.UPLOADED_FILES, "value"),
+    State(ids.Store.UPLOADED_FILES, "data"),
+    State(ids.Store.SETTINGS, "data"),
+    State(ids.Input.SPATIAL_BIN_RADIAL_COUNT, "value"),
+    State(ids.Input.SPATIAL_BIN_ANGULAR_COUNT, "value"),
+    State(ids.Input.SPATIAL_BIN_ACCEPTED_VARIATION, "value"),
+    State(ids.RadioItems.SPATIAL_BIN_ACCEPTED_VARIATION_MODE, "value"),
+    State({"type": "spatial_batch_mode", "z": ALL}, "value"),
+    State({"type": "spatial_batch_mode", "z": ALL}, "id"),
+    State({"type": "spatial_batch_value", "z": ALL}, "value"),
+    State({"type": "spatial_batch_value", "z": ALL}, "id"),
+    State({"type": "spatial_batch_exclude", "z": ALL}, "value"),
+    State({"type": "spatial_batch_exclude", "z": ALL}, "id"),
+    prevent_initial_call=True,
+)
+def build_batch_spatial_binning_payload(
+    n_clicks,
+    selected_file,
+    stored_files,
+    settings,
+    radial_bin_count,
+    angular_bin_count,
+    accepted_variation_value,
+    accepted_variation_mode,
+    batch_mode_values,
+    batch_mode_ids,
+    batch_value_values,
+    batch_value_ids,
+    batch_exclude_values,
+    batch_exclude_ids,
+):
+    if not n_clicks:
+        return no_update
+
+    if not selected_file or not stored_files or selected_file not in stored_files:
+        return no_update
+
+    file = Ellipsometry.from_path_or_stream(stored_files[selected_file])
+    z_keys = _resolve_spatial_batch_z_keys(file)
+    if not z_keys:
+        return no_update
+
+    default_mode = accepted_variation_mode if accepted_variation_mode in {"percent", "sigma"} else "percent"
+    default_value = _safe_float(
+        accepted_variation_value,
+        default=_default_spatial_batch_variation_value(default_mode),
+    )
+    if not np.isfinite(default_value) or default_value < 0:
+        default_value = _default_spatial_batch_variation_value(default_mode)
+
+    rules, excluded_z, parse_errors = _parse_spatial_batch_component_rules(
+        batch_mode_values,
+        batch_mode_ids,
+        batch_value_values,
+        batch_value_ids,
+        batch_exclude_values,
+        batch_exclude_ids,
+    )
+    root_name = _safe_filename_fragment(selected_file.rsplit(".", 1)[0])
+    base_settings = {**(settings or {})}
+
+    plots = []
+    for z_key in z_keys:
+        if z_key.lower() in excluded_z:
+            continue
+
+        override = rules.get(z_key.lower())
+        mode = override["mode"] if override else default_mode
+        value = float(override["value"]) if override else float(default_value)
+
+        batch_settings = {
+            **base_settings,
+            "z_data_value": z_key,
+            "_spatial_force_two_sigma_z_scale": True,
+        }
+        map_fig, trend_fig, count_panel = update_spatial_binning_tab(
+            "spatial_binning",
+            selected_file,
+            batch_settings,
+            radial_bin_count,
+            angular_bin_count,
+            value,
+            mode,
+            stored_files,
+        )
+
+        if not isinstance(map_fig, go.Figure) or not isinstance(trend_fig, go.Figure):
+            continue
+
+        snapshot_fig = _build_spatial_batch_snapshot_figure(z_key, map_fig, trend_fig, count_panel)
+
+        z_name = _safe_filename_fragment(z_key)
+        plots.append(
+            {
+                "filename": f"{root_name}_{z_name}_spatial_snapshot.png",
+                "figure": json.loads(snapshot_fig.to_json()),
+            }
+        )
+
+    if not plots:
+        return no_update
+
+    processed_z_count = sum(1 for z_key in z_keys if z_key.lower() not in excluded_z)
+    overridden_count = sum(1 for z_key in z_keys if z_key.lower() in rules and z_key.lower() not in excluded_z)
+    message = (
+        f"Prepared {len(plots)} spatial-binning snapshot(s) "
+        f"({processed_z_count}/{len(z_keys)} Z parameters processed, overrides used for {overridden_count})."
+    )
+    if excluded_z:
+        message += f" Excluded {len(excluded_z)} Z parameter(s)."
+    if parse_errors:
+        message += f" Ignored {len(parse_errors)} invalid batch row(s)."
+
+    return {
+        "request_id": int(time.time() * 1000),
+        "zip_name": f"{root_name}_spatial_binning.zip",
+        "plots": plots,
+        "warnings": parse_errors,
+        "message": message,
+        "width": 1600,
+        "height": 1500,
+        "scale": 1,
+    }
+
+
+clientside_callback(
+    """
+    async function(payload) {
+        const noUpdate = window.dash_clientside.no_update;
+        if (!payload || !payload.plots || payload.plots.length === 0) {
+            return noUpdate;
+        }
+
+        if (typeof Plotly === "undefined" || typeof Plotly.toImage !== "function") {
+            return "Spatial binning batch export failed: Plotly image export API is unavailable in the browser.";
+        }
+        if (typeof window.JSZip === "undefined") {
+            return "Spatial binning batch export failed: JSZip is unavailable in the browser.";
+        }
+
+        const width = payload.width || 1400;
+        const height = payload.height || 1000;
+        const scale = payload.scale || 1;
+        const plots = payload.plots;
+        const warnings = payload.warnings || [];
+        const zipName = payload.zip_name || "spatial_binning_batch.zip";
+
+        const tempDiv = document.createElement("div");
+        tempDiv.style.position = "fixed";
+        tempDiv.style.left = "-10000px";
+        tempDiv.style.top = "-10000px";
+        tempDiv.style.width = `${width}px`;
+        tempDiv.style.height = `${height}px`;
+        document.body.appendChild(tempDiv);
+
+        try {
+            const zip = new window.JSZip();
+            let plotted = false;
+            for (let idx = 0; idx < plots.length; idx++) {
+                const plot = plots[idx];
+                const figure = plot.figure || {};
+                const data = figure.data || [];
+                const layout = figure.layout || {};
+                const filename = (plot.filename || `spatial_binning_plot_${idx + 1}.png`).replace(/\\.png$/i, "");
+
+                if (!plotted) {
+                    await Plotly.newPlot(tempDiv, data, layout, {displayModeBar: false, responsive: false, staticPlot: true});
+                    plotted = true;
+                } else {
+                    await Plotly.react(tempDiv, data, layout, {displayModeBar: false, responsive: false, staticPlot: true});
+                }
+
+                const pngDataUrl = await Plotly.toImage(tempDiv, {
+                    format: "png",
+                    width: width,
+                    height: height,
+                    scale: scale
+                });
+                const base64Data = (pngDataUrl || "").split(",")[1];
+                if (!base64Data) {
+                    throw new Error(`PNG export failed for ${filename}.png.`);
+                }
+                zip.file(`${filename}.png`, base64Data, {base64: true});
+            }
+
+            if (warnings.length > 0) {
+                zip.file("batch_rule_warnings.txt", warnings.join("\\n"));
+            }
+
+            const zipBlob = await zip.generateAsync({type: "blob"});
+            const zipUrl = URL.createObjectURL(zipBlob);
+            const anchor = document.createElement("a");
+            anchor.href = zipUrl;
+            anchor.download = zipName;
+            document.body.appendChild(anchor);
+            anchor.click();
+            anchor.remove();
+            URL.revokeObjectURL(zipUrl);
+
+            if (payload.message) {
+                return payload.message;
+            }
+            return `Spatial binning batch download complete (${plots.length} PNG files).`;
+        } catch (error) {
+            const message = (error && error.message) ? error.message : String(error);
+            console.error("Spatial binning batch browser export failed:", error);
+            return `Spatial binning batch export failed: ${message}`;
+        } finally {
+            try {
+                Plotly.purge(tempDiv);
+            } catch (e) {}
+            tempDiv.remove();
+        }
+    }
+    """,
+    Output(ids.Div.INFO, "children", allow_duplicate=True),
+    Input(ids.Store.BATCH_SPATIAL_BINNING_PAYLOAD, "data"),
+    prevent_initial_call=True,
+)
 

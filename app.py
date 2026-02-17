@@ -31,6 +31,7 @@ app.layout = dbc.Container([
     dcc.Store(id=ids.Store.DEFAULT_SETTINGS, data=DEFAULT_SETTINGS),
     dcc.Store(id=ids.Store.SETTINGS, data={}),
     dcc.Store(id=ids.Store.BATCH_MAIN_PLOTS_PAYLOAD, data={}),
+    dcc.Store(id=ids.Store.BATCH_SPATIAL_BINNING_PAYLOAD, data={}),
 
     dbc.Row([
         # Left column
