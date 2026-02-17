@@ -14,6 +14,53 @@ logger = logging.getLogger(__name__)
 
 
 
+def _read_scan_points(lines:list[str]) -> pd.DataFrame|None:
+    """
+    Parse scan-point section files and return x/y coordinates.
+
+    Expected markers:
+    - start_Scan Points
+    - end_Scan Points
+    """
+
+    if not lines:
+        return None
+
+    start_idx = None
+    end_idx = None
+    for idx, line in enumerate(lines):
+        token = line.strip().lower()
+        if token == "start_scan points":
+            start_idx = idx + 1
+            continue
+        if token == "end_scan points" and start_idx is not None:
+            end_idx = idx
+            break
+
+    if start_idx is None or end_idx is None or start_idx >= end_idx:
+        return None
+
+    points = []
+    for line in lines[start_idx:end_idx]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        values = []
+        for token in re.split(r"\s+", stripped):
+            try:
+                values.append(float(token))
+            except ValueError:
+                continue
+
+        if len(values) >= 2:
+            points.append((values[0], values[1]))
+
+    scan_df = pd.DataFrame(points, columns=["x", "y"], dtype=float)
+    scan_df.attrs["source_format"] = "scan_points"
+    return scan_df
+
+
 def read_data(filepath_or_stream:str|bytes) -> pd.DataFrame:
     """
     Read the jaw.TXT file from at filepath or a stream
@@ -59,6 +106,10 @@ def read_data(filepath_or_stream:str|bytes) -> pd.DataFrame:
         logger.info("Expected filepath or stream got type: %s" % type(filepath_or_stream))
         return pd.DataFrame()
 
+    scan_data = _read_scan_points(lines)
+    if scan_data is not None:
+        logger.info("Detected scan-points file format with %d points.", len(scan_data.index))
+        return scan_data
 
     # Find lines with the data, by matching (decimal,decimal)
 
@@ -102,6 +153,7 @@ def read_data(filepath_or_stream:str|bytes) -> pd.DataFrame:
     data['x'] = x
     data['y'] = y
     data.drop(data.columns[0], axis=1, inplace=True)  # drops first column with string (x.xxx, y.yyy) coordinates
+    data.attrs["source_format"] = "jaw_table"
 
     return data
 

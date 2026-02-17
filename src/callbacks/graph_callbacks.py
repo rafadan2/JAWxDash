@@ -961,8 +961,7 @@ def _build_main_figure(file, settings, z_label=None, force_two_sigma=False, stag
     )
     settings = {**DEFAULT_SETTINGS, **(settings or {})}
 
-    z_label = _resolve_z_key(file, z_label or settings.get("z_data_value"))
-    if not z_label:
+    if file.data.empty or "x" not in file.data or "y" not in file.data:
         return figure, None
 
     x_data = np.array(file.data["x"])
@@ -972,6 +971,60 @@ def _build_main_figure(file, settings, z_label=None, force_two_sigma=False, stag
     xy = translate(xy, [settings["mappattern_x"], settings["mappattern_y"]])
     x_data = xy[0, :]
     y_data = xy[1, :]
+
+    z_label = _resolve_z_key(file, z_label or settings.get("z_data_value"))
+    if not z_label:
+        finite_mask = np.isfinite(x_data) & np.isfinite(y_data)
+        x_plot = x_data[finite_mask]
+        y_plot = y_data[finite_mask]
+        is_ellipse = settings["marker_type"] == "ellipse"
+        marker_color = "#1f77b4"
+        try:
+            marker_color = px.colors.sample_colorscale(
+                colorscale=settings["colormap_value"],
+                samplepoints=[0.5],
+            )[0]
+        except Exception:
+            marker_color = "#1f77b4"
+        scan_shapes = []
+        if x_plot.size:
+            figure.add_trace(
+                go.Scatter(
+                    x=x_plot,
+                    y=y_plot,
+                    mode="markers",
+                    marker=dict(
+                        size=settings["marker_size"],
+                        opacity=0 if is_ellipse else 1,
+                        color=marker_color,
+                    ),
+                    hovertemplate="x: %{x}<br>y: %{y}<extra></extra>",
+                    showlegend=False,
+                    name="Scan points",
+                )
+            )
+            if is_ellipse:
+                scan_shapes.extend(
+                    [
+                        gen_spot(
+                            x,
+                            y,
+                            marker_color,
+                            settings["spot_size"],
+                            settings["angle_of_incident"],
+                        )
+                        for x, y in zip(x_plot, y_plot)
+                    ]
+                )
+        _apply_map_layout_and_shapes(
+            figure,
+            settings,
+            x_data,
+            y_data,
+            stage_outline=stage_outline,
+            base_shapes=scan_shapes,
+        )
+        return figure, None
 
     z_data = file.data[z_label].to_numpy()
 
